@@ -1,0 +1,19 @@
+[Unit]
+Description=Clipboard History Daemon
+Documentation=https://github.com/anthropics/claude-code
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/clipboard-history
+Restart=on-failure
+RestartSec=3
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+# GDK_BACKEND=x11 forces XWayland which enables pixel-accurate positioning on
+# Wayland sessions (GNOME/Mutter always provides XWayland). Remove this line
+# on a pure Wayland compositor without XWayland (positioning will be centred).
+Environment=GDK_BACKEND=x11
+
+[Install]
+WantedBy=graphical-session.target

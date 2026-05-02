@@ -1,0 +1,106 @@
+"""
+Persistent virtual keyboard via python-evdev/uinput.
+
+Creates a single UInput device at daemon start. Because the kernel device
+stays registered with Mutter/libinput for the daemon's lifetime, key events
+arrive without the ephemeral-device timing race that ydotool standalone has
+(which creates a new uinput device per invocation and races against libinput
+device discovery).
+"""
+import time
+
+_uinput = None  # evdev.UInput instance, or None if unavailable
+
+
+def start() -> bool:
+    """Create the persistent virtual keyboard. Returns True on success."""
+    global _uinput
+    try:
+        from evdev import UInput, ecodes as e
+
+        caps = {e.EV_KEY: [
+            e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL,
+            e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT,
+            e.KEY_LEFTALT, e.KEY_RIGHTALT,
+            e.KEY_V, e.KEY_C, e.KEY_X, e.KEY_Z,
+        ]}
+        _uinput = UInput(caps, name='clipboard-history-kbd', version=0x1)
+        dev_path = getattr(getattr(_uinput, 'device', None), 'path', '(unknown)')
+        print(f'[uinput_kbd] virtual keyboard created: {dev_path}', flush=True)
+        return True
+    except ImportError:
+        print('[uinput_kbd] python-evdev not installed — will use ydotool/xdotool', flush=True)
+        return False
+    except PermissionError as ex:
+        print(f'[uinput_kbd] /dev/uinput permission denied: {ex} — run install.sh to fix', flush=True)
+        return False
+    except Exception as ex:
+        print(f'[uinput_kbd] start failed: {ex}', flush=True)
+        return False
+
+
+_KEY_MAP = {
+    'ctrl':    None,  # filled in lazily after evdev import
+    'control': None,
+    'shift':   None,
+    'alt':     None,
+    'v': None, 'c': None, 'x': None, 'z': None,
+}
+
+
+def inject_key(key_str: str) -> bool:
+    """
+    Inject a key combination. key_str format: 'ctrl+v' or 'ctrl+shift+v'.
+    Returns True on success, False if the virtual keyboard is unavailable.
+    """
+    if _uinput is None:
+        return False
+
+    try:
+        from evdev import ecodes as e
+
+        _MAP = {
+            'ctrl':    e.KEY_LEFTCTRL,
+            'control': e.KEY_LEFTCTRL,
+            'shift':   e.KEY_LEFTSHIFT,
+            'alt':     e.KEY_LEFTALT,
+            'v': e.KEY_V,
+            'c': e.KEY_C,
+            'x': e.KEY_X,
+            'z': e.KEY_Z,
+        }
+
+        parts = [p.lower().strip() for p in key_str.split('+')]
+        codes = []
+        for p in parts:
+            if p not in _MAP:
+                print(f'[uinput_kbd] unknown key {p!r} in {key_str!r}', flush=True)
+                return False
+            codes.append(_MAP[p])
+
+        # Press all keys down, then release in reverse — standard modifier chord.
+        for code in codes:
+            _uinput.write(e.EV_KEY, code, 1)
+        _uinput.syn()
+
+        time.sleep(0.02)  # 20 ms hold — enough for any compositor
+
+        for code in reversed(codes):
+            _uinput.write(e.EV_KEY, code, 0)
+        _uinput.syn()
+
+        print(f'[uinput_kbd] injected {key_str!r}', flush=True)
+        return True
+    except Exception as ex:
+        print(f'[uinput_kbd] inject_key {key_str!r} failed: {ex}', flush=True)
+        return False
+
+
+def stop() -> None:
+    global _uinput
+    if _uinput:
+        try:
+            _uinput.close()
+        except Exception:
+            pass
+        _uinput = None
