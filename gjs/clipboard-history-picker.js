@@ -117,6 +117,8 @@ class ClipboardHistoryPicker {
         this.selected = 0;
         this.target = activeTarget();
         this.position = loadPosition();
+        this.closeOnFocusLossArmed = false;
+        this.wasActive = false;
 
         this.window = new Gtk.ApplicationWindow({
             application,
@@ -125,6 +127,7 @@ class ClipboardHistoryPicker {
             default_height: POPUP_HEIGHT,
             resizable: false,
         });
+        this.window.connect('notify::is-active', () => this.closeOnFocusLoss());
 
         this.buildUi();
         this.loadEntries();
@@ -221,6 +224,21 @@ class ClipboardHistoryPicker {
             return false;
         });
         this.window.add_controller(key);
+    }
+
+    closeOnFocusLoss() {
+        if (this.window.is_active) {
+            this.wasActive = true;
+            return;
+        }
+
+        if (!this.closeOnFocusLossArmed)
+            return;
+
+        if (!this.wasActive)
+            return;
+
+        this.application.quit();
     }
 
     loadEntries() {
@@ -383,6 +401,10 @@ class ClipboardHistoryPicker {
     present() {
         this.window.present();
         this.search.grab_focus();
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 450, () => {
+            this.closeOnFocusLossArmed = true;
+            return GLib.SOURCE_REMOVE;
+        });
     }
 }
 
