@@ -88,6 +88,8 @@ _setup_input_injection
 _disable_gpaste() {
     # Stop tracking and kill the running daemon
     gsettings set org.gnome.GPaste track-changes false 2>/dev/null || true
+    gsettings set org.gnome.GPaste show-history "''" 2>/dev/null || true
+    gsettings set org.gnome.GPaste pop "''" 2>/dev/null || true
     pkill -x gpaste-daemon 2>/dev/null || true
 
     # Block D-Bus auto-activation by shadowing the session-bus service files
