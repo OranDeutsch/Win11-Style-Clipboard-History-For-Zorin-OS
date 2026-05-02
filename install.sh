@@ -36,9 +36,10 @@ _install_build_deps
 # ── Build and install Rust binary ─────────────────────────────────────────────
 cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
 install -m 0755 "$SCRIPT_DIR/target/release/clipboard-history" "$BIN_DIR/clipboard-history"
+install -m 0755 "$SCRIPT_DIR/gjs/clipboard-history-picker.js" "$LIB_DIR/clipboard-history-picker.js"
 cat > "$BIN_DIR/clipboard-history-show" << LAUNCHER
 #!/bin/bash
-exec "$BIN_DIR/clipboard-history" --show
+GDK_BACKEND=x11 exec gjs "$LIB_DIR/clipboard-history-picker.js"
 LAUNCHER
 chmod +x "$BIN_DIR/clipboard-history-show"
 
@@ -117,7 +118,7 @@ else
     echo "  WARNING: daemon may not have started. Check: systemctl --user status clipboard-history"
 fi
 
-# ── Remove old external GNOME keyboard shortcut ──────────────────────────────
+# ── GNOME keyboard shortcut (Super+V) ────────────────────────────────────────
 MK_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 CH_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 CH_SCHEMA="${MK_SCHEMA}.custom-keybinding:${CH_PATH}"
@@ -132,12 +133,9 @@ done
 
 gsettings set "$CH_SCHEMA" name    "Clipboard History"
 gsettings set "$CH_SCHEMA" command "$BIN_DIR/clipboard-history-show"
-gsettings set "$CH_SCHEMA" binding "''"
+gsettings set "$CH_SCHEMA" binding "'<Super>v'"
 
-CURRENT=$(gsettings get "$MK_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
-if [[ "$CURRENT" == "['$CH_PATH']" ]]; then
-    gsettings set "$MK_SCHEMA" custom-keybindings "[]"
-fi
+gsettings set "$MK_SCHEMA" custom-keybindings "['$CH_PATH']"
 
 echo ""
 if command -v gnome-extensions >/dev/null 2>&1; then
@@ -145,11 +143,13 @@ if command -v gnome-extensions >/dev/null 2>&1; then
     gnome-extensions disable "GPaste@gnome-shell-extensions.gnome.org" 2>/dev/null || true
     gnome-extensions disable "clipboard-history-rust@missionzero" 2>/dev/null || true
     gnome-extensions disable "clipboard-history-gjs@missionzero.dev" 2>/dev/null || true
-    gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+    # The Shell extension is installed for the next Shell/session reload, but
+    # Super+V uses the GJS launcher immediately so updates do not require logout.
+    gnome-extensions disable "$EXT_UUID" 2>/dev/null || true
 fi
 
 echo "Installation complete!"
-echo "  Press Super+V to open the GNOME Shell clipboard history"
+echo "  Press Super+V to open Clipboard History"
 echo "  Press Escape or click outside to close"
 echo "  Click an entry to paste it"
 echo ""

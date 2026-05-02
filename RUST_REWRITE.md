@@ -1,7 +1,8 @@
-# GJS Shell UI + Rust Daemon Notes
+# GJS UI + Rust Daemon Notes
 
-The visible picker is now a GNOME Shell extension written in GJS. The Rust binary remains as the native helper daemon for clipboard monitoring, SQLite storage, and paste injection.
+The visible picker is now written in GJS. The Rust binary remains as the native helper daemon for clipboard monitoring, SQLite storage, and paste injection.
 
+- `gjs/clipboard-history-picker.js` is the immediate Super+V picker.
 - `shell-extension/extension.js` owns the `Super+V` shortcut and renders the history picker inside GNOME Shell.
 - `shell-extension/schemas/` stores the Shell keybinding and picker placement setting.
 - `src/main.rs` starts the helper daemon or sends CLI commands such as `--list`, `--paste`, `--pin`, `--delete`, and `--clear`.
@@ -9,7 +10,7 @@ The visible picker is now a GNOME Shell extension written in GJS. The Rust binar
 - `src/db.rs` keeps the existing SQLite schema and data directory.
 - `src/monitor.rs` watches the GTK clipboard and stores copied text/images.
 - `src/paste.rs` creates a persistent `/dev/uinput` keyboard for paste injection, with `ydotool`/`xdotool` as a fallback.
-- `install.sh` builds the Rust release binary, installs the GNOME Shell extension, and enables the Shell keybinding.
+- `install.sh` builds the Rust release binary, installs the GJS picker, installs the GNOME Shell extension files, and binds Super+V to the GJS picker.
 
 GNOME reality:
 
