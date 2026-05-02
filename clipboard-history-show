@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""Send SHOW command to the running clipboard-history daemon."""
-import socket
-import sys
-import os
-
-SOCKET_PATH = os.path.expanduser(
-    '~/.local/share/clipboard-history/control.sock'
-)
-
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(SOCKET_PATH)
-    s.send(b'SHOW')
-    s.close()
-except FileNotFoundError:
-    print('clipboard-history daemon not running', file=sys.stderr)
-    sys.exit(1)
-except Exception as e:
-    print(f'Error: {e}', file=sys.stderr)
-    sys.exit(1)
+#!/bin/bash
+# Trigger the running Rust daemon from a local checkout.
+exec cargo run --manifest-path "$(dirname "$(readlink -f "$0")")/Cargo.toml" -- --show

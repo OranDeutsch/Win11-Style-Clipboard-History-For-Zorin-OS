@@ -12,55 +12,35 @@ echo "Installing Clipboard History..."
 # ── Directories ──────────────────────────────────────────────────────────────
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$SERVICE_DIR" "$DATA_DIR/images"
 
-# ── Copy source files ─────────────────────────────────────────────────────────
-cp -f "$SCRIPT_DIR/src/"*.py "$LIB_DIR/"
-cp -f "$SCRIPT_DIR/src/style.css" "$LIB_DIR/"
+# ── Rust/GTK build dependencies ──────────────────────────────────────────────
+_install_build_deps() {
+    local missing=()
+    command -v cargo >/dev/null 2>&1 || missing+=(cargo rustc)
+    command -v pkg-config >/dev/null 2>&1 || missing+=(pkg-config)
+    pkg-config --exists gtk4 2>/dev/null || missing+=(libgtk-4-dev)
+    pkg-config --exists x11 2>/dev/null || missing+=(libx11-dev)
+    command -v cc >/dev/null 2>&1 || missing+=(build-essential)
+    command -v wl-copy >/dev/null 2>&1 || missing+=(wl-clipboard)
 
-# ── Launcher: clipboard-history (daemon) ──────────────────────────────────────
-cat > "$BIN_DIR/clipboard-history" << LAUNCHER
+    if (( ${#missing[@]} > 0 )); then
+        echo "  Installing build dependencies: ${missing[*]}"
+        sudo apt-get update
+        sudo apt-get install -y "${missing[@]}"
+    fi
+}
+_install_build_deps
+
+# ── Build and install Rust binary ─────────────────────────────────────────────
+cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+install -m 0755 "$SCRIPT_DIR/target/release/clipboard-history" "$BIN_DIR/clipboard-history"
+cat > "$BIN_DIR/clipboard-history-show" << LAUNCHER
 #!/bin/bash
-exec python3 "$LIB_DIR/main.py" "\$@"
+exec "$BIN_DIR/clipboard-history" --show
 LAUNCHER
-chmod +x "$BIN_DIR/clipboard-history"
-
-# ── Trigger: clipboard-history-show (hotkey target) ───────────────────────────
-cat > "$BIN_DIR/clipboard-history-show" << 'TRIGGER'
-#!/usr/bin/env python3
-import socket, sys, os
-path = os.path.expanduser('~/.local/share/clipboard-history/control.sock')
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(path)
-    s.send(b'SHOW')
-    s.close()
-except FileNotFoundError:
-    print('clipboard-history daemon not running', file=sys.stderr)
-    sys.exit(1)
-TRIGGER
 chmod +x "$BIN_DIR/clipboard-history-show"
 
-# ── Wayland key injection: evdev + ydotool ───────────────────────────────────
-# python3-evdev creates a persistent uinput virtual keyboard at daemon start.
-# This avoids the ephemeral-device timing race in ydotool standalone mode
-# (ydotool creates a new /dev/input device per invocation; Mutter/libinput may
-# not register it before the key events fire).  ydotool is kept as a fallback.
+# ── Wayland key injection: native uinput + ydotool fallback ───────────────────
 _setup_input_injection() {
-    local need_udev=0
-
-    # ── python3-evdev (primary) ──────────────────────────────────────────────
-    if python3 -c 'import evdev' 2>/dev/null; then
-        echo "  python3-evdev: already installed"
-    else
-        echo "  Installing python3-evdev..."
-        if sudo apt-get install -y python3-evdev 2>&1 \
-                | grep -v '^Get\|^Fetched\|^Preparing\|^Unpacking\|^Setting'; then
-            echo "  python3-evdev: installed"
-        else
-            echo "  WARNING: python3-evdev install failed — will fall back to ydotool"
-        fi
-    fi
-
-    # ── ydotool (fallback) ───────────────────────────────────────────────────
     if ! command -v ydotool &>/dev/null; then
         echo "  Installing ydotool..."
         if ! sudo apt-get install -y ydotool 2>&1 \
@@ -81,7 +61,8 @@ _setup_input_injection() {
         fi
     fi
 
-    # Clean up any leftover ydotoold service (not used in this build).
+    # Clean up any leftover ydotoold service. The Rust daemon keeps its own
+    # persistent uinput keyboard and only shells out to ydotool as a fallback.
     systemctl --user disable --now ydotoold 2>/dev/null || true
     rm -f "$SERVICE_DIR/ydotoold.service"
     systemctl --user daemon-reload 2>/dev/null || true
@@ -89,6 +70,26 @@ _setup_input_injection() {
     echo "  Input injection: ready"
 }
 _setup_input_injection
+
+# ── Disable GPaste (conflicts via D-Bus activation) ──────────────────────────
+_disable_gpaste() {
+    # Stop tracking and kill the running daemon
+    gsettings set org.gnome.GPaste track-changes false 2>/dev/null || true
+    pkill -x gpaste-daemon 2>/dev/null || true
+
+    # Block D-Bus auto-activation by shadowing the session-bus service files
+    # with stubs that exec /bin/false. User files in ~/.local/share/dbus-1/services/
+    # take precedence over /usr/share/dbus-1/services/ for the session bus.
+    local dbus_user_svc="$HOME/.local/share/dbus-1/services"
+    mkdir -p "$dbus_user_svc"
+    for name in org.gnome.GPaste org.gnome.GPaste.Ui org.gnome.GPaste.Preferences; do
+        printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$name" \
+            > "$dbus_user_svc/$name.service"
+    done
+
+    echo "  GPaste: disabled"
+}
+_disable_gpaste
 
 # ── systemd service ───────────────────────────────────────────────────────────
 cp -f "$SCRIPT_DIR/clipboard-history.service" "$SERVICE_DIR/"
@@ -109,34 +110,30 @@ MK_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 CH_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 CH_SCHEMA="${MK_SCHEMA}.custom-keybinding:${CH_PATH}"
 
-# Remove stale GPaste/CopyQ entries for Super+V to avoid conflicts
+# Remove stale GPaste/CopyQ entries to avoid conflicts or dead shortcuts.
 for old_path in \
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gpaste/" \
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/copyq/"; do
     old_schema="${MK_SCHEMA}.custom-keybinding:${old_path}"
-    old_binding=$(gsettings get "$old_schema" binding 2>/dev/null || echo "''")
-    if [[ "$old_binding" == *"Super>v"* ]]; then
-        gsettings set "$old_schema" binding "''" 2>/dev/null || true
-        echo "  Cleared conflicting Super+V binding from: $old_path"
-    fi
+    gsettings set "$old_schema" binding "''" 2>/dev/null || true
 done
 
 gsettings set "$CH_SCHEMA" name    "Clipboard History"
 gsettings set "$CH_SCHEMA" command "$BIN_DIR/clipboard-history-show"
 gsettings set "$CH_SCHEMA" binding "'<Super>v'"
 
-# Add our path to the custom-keybindings list
-CURRENT=$(gsettings get "$MK_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
-if [[ "$CURRENT" != *"clipboard-history"* ]]; then
-    if [[ "$CURRENT" == "@as []" ]] || [[ "$CURRENT" == "[]" ]]; then
-        gsettings set "$MK_SCHEMA" custom-keybindings "['$CH_PATH']"
-    else
-        NEW="${CURRENT%]}, '$CH_PATH']"
-        gsettings set "$MK_SCHEMA" custom-keybindings "$NEW"
-    fi
-fi
+# Keep this list precise; stale clipboard-manager paths can prevent GNOME from
+# dispatching Super+V predictably after extension/keybinding churn.
+gsettings set "$MK_SCHEMA" custom-keybindings "['$CH_PATH']"
 
 echo ""
+if command -v gnome-extensions >/dev/null 2>&1; then
+    # Keep conflicting clipboard extensions from stealing Super+V.
+    gnome-extensions disable "GPaste@gnome-shell-extensions.gnome.org" 2>/dev/null || true
+    gnome-extensions disable "clipboard-history-rust@missionzero" 2>/dev/null || true
+    gnome-extensions disable "clipboard-history-rust@missionzero.dev" 2>/dev/null || true
+fi
+
 echo "Installation complete!"
 echo "  Press Super+V to open Clipboard History"
 echo "  Press Escape or click outside to close"

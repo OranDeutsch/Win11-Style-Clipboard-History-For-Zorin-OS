@@ -1,0 +1,22 @@
+[package]
+name = "clipboard-history"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "5.0"
+gio = "0.19"
+glib = "0.19"
+gtk = { package = "gtk4", version = "0.8", features = ["v4_10"] }
+libc = "0.2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+
+# Cargo 1.75 cannot parse newer transitive manifests that use Rust 2024
+# metadata. Pinning these keeps the GTK macro stack on Rust-2021-era crates.
+proc-macro-crate = "=3.1.0"
+toml_edit = "=0.21.1"
+indexmap = "=2.2.6"

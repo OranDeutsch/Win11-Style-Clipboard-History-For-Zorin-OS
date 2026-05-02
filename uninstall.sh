@@ -15,8 +15,12 @@ systemctl --user stop clipboard-history 2>/dev/null || true
 systemctl --user disable clipboard-history 2>/dev/null || true
 
 # Remove files
+gnome-extensions disable "clipboard-history-rust@missionzero.dev" 2>/dev/null || true
+gnome-extensions disable "clipboard-history-rust@missionzero" 2>/dev/null || true
 rm -f "$BIN_DIR/clipboard-history" "$BIN_DIR/clipboard-history-show"
 rm -rf "$LIB_DIR"
+rm -rf "$HOME/.local/share/gnome-shell/extensions/clipboard-history-rust@missionzero.dev"
+rm -rf "$HOME/.local/share/gnome-shell/extensions/clipboard-history-rust@missionzero"
 rm -f "$SERVICE_DIR/clipboard-history.service"
 systemctl --user daemon-reload
 
@@ -27,17 +31,11 @@ gsettings reset "$CH_SCHEMA" command 2>/dev/null || true
 gsettings reset "$CH_SCHEMA" binding 2>/dev/null || true
 
 CURRENT=$(gsettings get "$MK_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
-FILTERED=$(python3 -c "
-import ast, sys
-current = '''$CURRENT'''
-try:
-    items = ast.literal_eval(current)
-    items = [i for i in items if 'clipboard-history' not in i]
-    print('[' + ', '.join(repr(i) for i in items) + ']')
-except:
-    print(current)
-")
-gsettings set "$MK_SCHEMA" custom-keybindings "$FILTERED" 2>/dev/null || true
+if [[ "$CURRENT" == "['$CH_PATH']" ]]; then
+    gsettings set "$MK_SCHEMA" custom-keybindings "[]" 2>/dev/null || true
+else
+    echo "Leaving custom keybinding list unchanged because it contains other entries."
+fi
 
 echo "Clipboard History removed."
 echo ""

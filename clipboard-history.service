@@ -10,9 +10,9 @@ ExecStart=%h/.local/bin/clipboard-history
 Restart=on-failure
 RestartSec=3
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-# GDK_BACKEND=x11 forces XWayland which enables pixel-accurate positioning on
-# Wayland sessions (GNOME/Mutter always provides XWayland). Remove this line
-# on a pure Wayland compositor without XWayland (positioning will be centred).
+# Force XWayland so a background service can present the picker more reliably
+# under GNOME/Zorin Wayland. Native Wayland windows from background daemons are
+# subject to stricter compositor activation rules.
 Environment=GDK_BACKEND=x11
 
 [Install]
