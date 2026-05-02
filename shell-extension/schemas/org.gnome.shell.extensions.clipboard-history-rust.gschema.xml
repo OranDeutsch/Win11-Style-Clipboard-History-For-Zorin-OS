@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.clipboard-history-rust" path="/org/gnome/shell/extensions/clipboard-history-rust/">
+    <key name="show-history" type="as">
+      <default>['&lt;Super&gt;v']</default>
+      <summary>Open clipboard history</summary>
+      <description>Keyboard shortcut for opening the clipboard history picker.</description>
+    </key>
+    <key name="popup-position" type="s">
+      <default>'center'</default>
+      <summary>Picker location</summary>
+      <description>Where the clipboard history picker opens.</description>
+    </key>
+  </schema>
+</schemalist>

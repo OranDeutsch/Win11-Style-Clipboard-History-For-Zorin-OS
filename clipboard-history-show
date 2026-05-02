@@ -1,3 +1,3 @@
 #!/bin/bash
-# Trigger the running Rust daemon from a local checkout.
+# Legacy local-checkout trigger. Super+V is handled by the GNOME Shell extension.
 exec cargo run --manifest-path "$(dirname "$(readlink -f "$0")")/Cargo.toml" -- --show

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::fs;
@@ -8,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ENTRIES: i64 = 50;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Entry {
     pub id: i64,
     pub kind: String,
@@ -131,6 +132,29 @@ impl Database {
         })?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn entry(&self, id: i64) -> Result<Option<Entry>> {
+        self.conn
+            .borrow()
+            .query_row(
+                "SELECT id, type, content, image_path, pinned, created_at
+                 FROM entries
+                 WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Entry {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        content: row.get(2)?,
+                        image_path: row.get(3)?,
+                        pinned: row.get::<_, i64>(4)? != 0,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn toggle_pin(&self, id: i64) -> Result<()> {

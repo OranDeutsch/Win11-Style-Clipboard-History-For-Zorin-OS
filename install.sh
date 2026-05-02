@@ -6,6 +6,8 @@ BIN_DIR="$HOME/.local/bin"
 LIB_DIR="$HOME/.local/lib/clipboard-history"
 SERVICE_DIR="$HOME/.config/systemd/user"
 DATA_DIR="$HOME/.local/share/clipboard-history"
+EXT_UUID="clipboard-history-rust@missionzero.dev"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
 
 echo "Installing Clipboard History..."
 
@@ -20,6 +22,7 @@ _install_build_deps() {
     pkg-config --exists gtk4 2>/dev/null || missing+=(libgtk-4-dev)
     pkg-config --exists x11 2>/dev/null || missing+=(libx11-dev)
     command -v cc >/dev/null 2>&1 || missing+=(build-essential)
+    command -v glib-compile-schemas >/dev/null 2>&1 || missing+=(libglib2.0-bin)
     command -v wl-copy >/dev/null 2>&1 || missing+=(wl-clipboard)
 
     if (( ${#missing[@]} > 0 )); then
@@ -38,6 +41,15 @@ cat > "$BIN_DIR/clipboard-history-show" << LAUNCHER
 exec "$BIN_DIR/clipboard-history" --show
 LAUNCHER
 chmod +x "$BIN_DIR/clipboard-history-show"
+
+# ── GNOME Shell extension UI ─────────────────────────────────────────────────
+rm -rf "$EXT_DIR"
+mkdir -p "$EXT_DIR/schemas"
+cp -f "$SCRIPT_DIR/shell-extension/metadata.json" "$EXT_DIR/"
+cp -f "$SCRIPT_DIR/shell-extension/extension.js" "$EXT_DIR/"
+cp -f "$SCRIPT_DIR/shell-extension/stylesheet.css" "$EXT_DIR/"
+cp -f "$SCRIPT_DIR/shell-extension/schemas/"*.xml "$EXT_DIR/schemas/"
+glib-compile-schemas "$EXT_DIR/schemas"
 
 # ── Wayland key injection: native uinput + ydotool fallback ───────────────────
 _setup_input_injection() {
@@ -105,7 +117,7 @@ else
     echo "  WARNING: daemon may not have started. Check: systemctl --user status clipboard-history"
 fi
 
-# ── GNOME keyboard shortcut (Super+V) ────────────────────────────────────────
+# ── Remove old external GNOME keyboard shortcut ──────────────────────────────
 MK_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 CH_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 CH_SCHEMA="${MK_SCHEMA}.custom-keybinding:${CH_PATH}"
@@ -120,22 +132,24 @@ done
 
 gsettings set "$CH_SCHEMA" name    "Clipboard History"
 gsettings set "$CH_SCHEMA" command "$BIN_DIR/clipboard-history-show"
-gsettings set "$CH_SCHEMA" binding "'<Super>v'"
+gsettings set "$CH_SCHEMA" binding "''"
 
-# Keep this list precise; stale clipboard-manager paths can prevent GNOME from
-# dispatching Super+V predictably after extension/keybinding churn.
-gsettings set "$MK_SCHEMA" custom-keybindings "['$CH_PATH']"
+CURRENT=$(gsettings get "$MK_SCHEMA" custom-keybindings 2>/dev/null || echo "@as []")
+if [[ "$CURRENT" == "['$CH_PATH']" ]]; then
+    gsettings set "$MK_SCHEMA" custom-keybindings "[]"
+fi
 
 echo ""
 if command -v gnome-extensions >/dev/null 2>&1; then
     # Keep conflicting clipboard extensions from stealing Super+V.
     gnome-extensions disable "GPaste@gnome-shell-extensions.gnome.org" 2>/dev/null || true
     gnome-extensions disable "clipboard-history-rust@missionzero" 2>/dev/null || true
-    gnome-extensions disable "clipboard-history-rust@missionzero.dev" 2>/dev/null || true
+    gnome-extensions disable "clipboard-history-gjs@missionzero.dev" 2>/dev/null || true
+    gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
 fi
 
 echo "Installation complete!"
-echo "  Press Super+V to open Clipboard History"
+echo "  Press Super+V to open the GNOME Shell clipboard history"
 echo "  Press Escape or click outside to close"
 echo "  Click an entry to paste it"
 echo ""

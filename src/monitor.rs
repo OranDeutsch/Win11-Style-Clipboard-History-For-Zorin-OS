@@ -59,10 +59,6 @@ impl ClipboardMonitor {
         }
     }
 
-    pub fn set_skip_hash(&self, hash: String) {
-        *self.skip_hash.borrow_mut() = Some(hash);
-    }
-
     fn on_changed(self: &Rc<Self>) {
         if self.clipboard.is_local() || self.reading.replace(true) {
             return;

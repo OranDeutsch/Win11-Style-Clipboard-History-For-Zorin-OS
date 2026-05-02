@@ -1,22 +1,24 @@
-# Rust Runtime Notes
+# GJS Shell UI + Rust Daemon Notes
 
-The app runtime is now Rust:
+The visible picker is now a GNOME Shell extension written in GJS. The Rust binary remains as the native helper daemon for clipboard monitoring, SQLite storage, and paste injection.
 
-- `src/main.rs` starts the GTK application or sends `--show`/`--quit` to the daemon.
+- `shell-extension/extension.js` owns the `Super+V` shortcut and renders the history picker inside GNOME Shell.
+- `shell-extension/schemas/` stores the Shell keybinding and picker placement setting.
+- `src/main.rs` starts the helper daemon or sends CLI commands such as `--list`, `--paste`, `--pin`, `--delete`, and `--clear`.
+- `src/app.rs` handles Unix socket commands for the Shell UI.
 - `src/db.rs` keeps the existing SQLite schema and data directory.
 - `src/monitor.rs` watches the GTK clipboard and stores copied text/images.
-- `src/ui.rs` builds a GTK4 popup using native widgets and symbolic icons so it follows the active Zorin/GTK theme as closely as GTK allows.
 - `src/paste.rs` creates a persistent `/dev/uinput` keyboard for paste injection, with `ydotool`/`xdotool` as a fallback.
-- `install.sh` now builds the Rust release binary and installs it to `~/.local/bin/clipboard-history`.
+- `install.sh` builds the Rust release binary, installs the GNOME Shell extension, and enables the Shell keybinding.
 
 GNOME reality:
 
-A true GNOME Shell extension cannot be 100% Rust because GNOME Shell extensions run in GJS. This rewrite is therefore the pure-Rust application path. If exact Windows-style shell overlay behavior becomes mandatory, the practical architecture is a tiny GJS extension bridge plus this Rust daemon.
+A true GNOME Shell extension cannot be 100% Rust because GNOME Shell extensions run in GJS. This is now the practical architecture: GJS for the Shell overlay and Rust for native helper work.
 
 Current behavior:
 
 - Super+V opens the picker.
-- The picker opens centered on the screen instead of chasing caret geometry.
+- The picker can open at Center, Mouse, or Window placement from the in-picker settings row.
 - Search filters entries.
 - Arrow keys select entries, and Enter/click pastes the selected entry.
 - Pin/delete/clear actions are available.
