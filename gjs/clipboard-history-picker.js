@@ -118,7 +118,6 @@ class ClipboardHistoryPicker {
         this.target = activeTarget();
         this.position = loadPosition();
         this.closeOnFocusLossArmed = false;
-        this.wasActive = false;
 
         this.window = new Gtk.ApplicationWindow({
             application,
@@ -127,7 +126,6 @@ class ClipboardHistoryPicker {
             default_height: POPUP_HEIGHT,
             resizable: false,
         });
-        this.window.connect('notify::is-active', () => this.closeOnFocusLoss());
 
         this.buildUi();
         this.loadEntries();
@@ -143,6 +141,9 @@ class ClipboardHistoryPicker {
             margin_start: 10,
             margin_end: 10,
         });
+        const focus = new Gtk.EventControllerFocus();
+        focus.connect('leave', () => this.closeOnFocusLoss());
+        root.add_controller(focus);
 
         this.search = new Gtk.SearchEntry({hexpand: true});
         root.append(this.search);
@@ -227,15 +228,7 @@ class ClipboardHistoryPicker {
     }
 
     closeOnFocusLoss() {
-        if (this.window.is_active) {
-            this.wasActive = true;
-            return;
-        }
-
         if (!this.closeOnFocusLossArmed)
-            return;
-
-        if (!this.wasActive)
             return;
 
         this.application.quit();
