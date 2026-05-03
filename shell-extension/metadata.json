@@ -1,7 +1,0 @@
-{
-  "uuid": "clipboard-history-rust@missionzero.dev",
-  "name": "Clipboard History",
-  "description": "Windows-style clipboard history picker for Zorin OS",
-  "shell-version": ["46"],
-  "settings-schema": "org.gnome.shell.extensions.clipboard-history-rust"
-}

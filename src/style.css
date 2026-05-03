@@ -1,0 +1,32 @@
+/* Clipboard History popup styles */
+
+.ch-preview {
+    font-size: 0.93em;
+}
+
+.ch-pinned-text {
+    font-weight: 600;
+}
+
+/* Tighten boxed-list rows a bit */
+.boxed-list > row {
+    min-height: 52px;
+}
+
+/* Search entry in header — give it breathing room */
+headerbar searchentry {
+    min-width: 200px;
+}
+
+/* Dim the action buttons slightly so content takes focus */
+.boxed-list > row > box > button.flat {
+    opacity: 0.6;
+}
+
+.boxed-list > row:selected > box > button.flat {
+    opacity: 0.9;
+}
+
+.boxed-list > row > box > button.flat:hover {
+    opacity: 1;
+}
