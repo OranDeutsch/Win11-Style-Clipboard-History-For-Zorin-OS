@@ -1,20 +1,18 @@
 # Win11-Style Clipboard History for Zorin OS
 
-A GJS clipboard-history picker for Zorin OS backed by a small Rust daemon. It aims to feel close to Windows clipboard history while staying native to the current Zorin/GTK theme.
+A Python/GTK4 clipboard-history picker for Zorin OS (GNOME). It aims to feel close to Windows 11 clipboard history while staying native to the current Zorin/GTK theme.
 
-Press `Super+V` to open a clipboard picker, search previous entries, select with the arrow keys, and paste with `Enter` or a click.
+Press `Super+V` to open the clipboard picker, search previous entries, select with the arrow keys, and paste with `Enter` or a click.
 
-## Current Behavior
+## Features
 
-- Stores text and image clipboard history in SQLite.
-- Opens with `Super+V`.
-- Shows a GJS/GTK popup using the active Zorin/GTK theme.
-- Includes an `Open at` selector in the history picker for `Center`, `Mouse`, or `Window` placement.
-- Supports search, pin, delete, and clear actions.
-- Supports arrow-key selection and `Enter` paste.
-- Closes with `Escape` or when focus leaves the picker.
-- Uses the Rust daemon for clipboard monitoring, SQLite storage, and `/dev/uinput` paste injection.
-- Disables GPaste during install so it does not steal `Super+V` or D-Bus clipboard events.
+- **Contextual Positioning**: Opens near your text cursor (caret) when possible.
+- **Wayland Support**: Includes experimental support for accurate caret positioning on Wayland/GNOME using IBus and GNOME Introspect.
+- **Rich History**: Stores text and image clipboard history in SQLite.
+- **Search & Filter**: Quickly find previous clips with an integrated search bar.
+- **Pinning**: Keep important clips at the top of the list.
+- **Native Aesthetics**: Built with GTK4 and Adwaita to match Zorin OS 17+ styling.
+- **Safe Paste**: Uses a persistent virtual keyboard (`uinput`/`evdev`) for reliable paste injection on both X11 and Wayland.
 
 ## Install
 
@@ -25,33 +23,48 @@ Run:
 ```
 
 The installer will:
-
-- install missing build/runtime packages where possible,
-- build the Rust release binary,
-- install `clipboard-history` and `clipboard-history-show` into `~/.local/bin`,
-- install the GJS picker and GNOME Shell extension files,
-- install and restart the user systemd service,
-- bind `Super+V` to the GJS picker,
-- disable conflicting GPaste hooks.
+- Install required dependencies (`python3-gi`, `python3-evdev`, `ydotool`, etc.).
+- Set up udev rules for `/dev/uinput` access.
+- Install the `clipboard-history` daemon as a systemd user service.
+- Bind `Super+V` to open the picker.
 
 ## Usage
 
-```bash
-clipboard-history --show
-clipboard-history --list
-clipboard-history --paste ENTRY_ID
-clipboard-history --quit
-systemctl --user status clipboard-history
-journalctl --user -u clipboard-history -f
-```
+- **Super+V**: Open the picker.
+- **Up / Down**: Move selection.
+- **Enter / Click**: Paste selected entry.
+- **Escape / Click Outside**: Close the picker.
+- **P**: Toggle pin on the selected item.
+- **Delete**: Remove the selected item.
 
-Keyboard controls:
+### Wayland Caret Positioning (Experimental)
 
-- `Super+V`: open the picker
-- `Up` / `Down`: move selection
-- `Home` / `End`: jump to first or last entry
-- `Enter`: paste selected entry
-- `Escape`: close
+On Wayland, absolute screen coordinates are restricted. To enable accurate placement near your text cursor:
+1. Open the picker (**Super+V**).
+2. Click the **Settings** (gear) icon.
+3. Toggle **Wayland Caret Positioning (Experimental)**.
+
+This mode uses:
+- **IBus**: To capture absolute cursor coordinates from input methods.
+- **GNOME Introspect**: To locate the active window's screen position.
+- **AT-SPI**: To find the caret position within the focused application.
+
+*Note: For absolute window moving on Wayland, a companion GNOME Shell extension is recommended to grant the application move permissions.*
+
+## Project Structure
+
+- `src/main.py`: Application entry point and daemon lifecycle.
+- `src/caret.py`: Fused caret tracking (AT-SPI + IBus + GNOME Introspect).
+- `src/popup.py`: GTK4 popup window and UI logic.
+- `src/monitor.py`: Clipboard monitoring and SQLite persistence.
+- `src/uinput_kbd.py`: Virtual keyboard for paste injection.
+- `src/db.py`: Database schema and queries.
+
+## Troubleshooting
+
+- **Check Service Status**: `systemctl --user status clipboard-history`
+- **View Logs**: `journalctl --user -u clipboard-history -f`
+- **Manual Show**: `clipboard-history --show`
 
 ## Uninstall
 
@@ -60,31 +73,3 @@ Run:
 ```bash
 ./uninstall.sh
 ```
-
-The uninstaller removes the installed binaries, service, Shell extension, old shell-extension bridge files, and the app keybinding. It asks before deleting the clipboard database and saved images.
-
-## GNOME/Zorin Positioning Note
-
-The visible picker is now written in GJS. Use the `Open at` selector in the picker to choose `Center`, `Mouse`, or `Window` placement.
-
-GNOME Shell still does not expose a reliable universal text-caret rectangle for every application on Wayland. `Mouse` or `Window` placement are the practical closest options for Windows-style insertion context.
-
-## Development
-
-```bash
-cargo check
-cargo build --release
-./clipboard-history
-./clipboard-history-show
-```
-
-Project layout:
-
-- `src/main.rs`: app startup and socket command client
-- `src/app.rs`: daemon state and Unix socket command handling
-- `src/db.rs`: SQLite storage
-- `src/monitor.rs`: clipboard monitoring
-- `src/paste.rs`: paste injection
-- `gjs/clipboard-history-picker.js`: GJS/GTK picker opened by `Super+V`
-- `shell-extension/extension.js`: GNOME Shell/GJS picker UI
-- `shell-extension/schemas/`: Shell shortcut and placement settings
