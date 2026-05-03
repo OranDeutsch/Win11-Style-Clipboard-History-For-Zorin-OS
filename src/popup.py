@@ -1,5 +1,6 @@
 import subprocess
 import hashlib
+import json
 import os
 import shutil
 import ctypes
@@ -28,6 +29,16 @@ _ON_WAYLAND: bool = bool(os.environ.get('WAYLAND_DISPLAY'))
 _HAS_YDOTOOL: bool = shutil.which('ydotool') is not None
 
 POPUP_WIDTH = 580
+SETTINGS_PATH = Path.home() / '.local' / 'share' / 'clipboard-history' / 'settings.json'
+POSITION_OS_DEFAULT = 'os-default'
+POSITION_MOUSE = 'mouse'
+POSITION_WINDOW = 'window'
+POSITION_OPTIONS = (POSITION_OS_DEFAULT, POSITION_MOUSE, POSITION_WINDOW)
+POSITION_LABELS = {
+    POSITION_OS_DEFAULT: 'OS default',
+    POSITION_MOUSE: 'Mouse',
+    POSITION_WINDOW: 'Window',
+}
 
 
 class _XSizeHints(ctypes.Structure):
@@ -172,6 +183,50 @@ def _fallback_anchor() -> dict:
         'age_ms': 0,
         'app': '',
     }
+
+
+def _make_anchor(source: str, confidence: str, rect: tuple[int, int, int, int],
+                 app: str = '', age_ms: int = 0) -> dict:
+    x, y, w, h = rect
+    return {
+        'source': source,
+        'confidence': confidence,
+        'x': x,
+        'y': y,
+        'width': w,
+        'height': h,
+        'age_ms': age_ms,
+        'app': app,
+    }
+
+
+def _mouse_anchor() -> dict | None:
+    try:
+        result = subprocess.run(
+            ['xdotool', 'getmouselocation', '--shell'],
+            capture_output=True,
+            text=True,
+            timeout=0.5
+        )
+        if result.returncode != 0:
+            print(f'[popup] mouse anchor failed: {result.stderr.strip()!r}', flush=True)
+            return None
+
+        vals: dict[str, int] = {}
+        for line in result.stdout.splitlines():
+            if '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            if key in ('X', 'Y'):
+                vals[key] = int(value)
+
+        if 'X' not in vals or 'Y' not in vals:
+            return None
+
+        return _make_anchor('mouse', 'manual', (vals['X'], vals['Y'], 1, 1))
+    except Exception as e:
+        print(f'[popup] mouse anchor failed: {e}', flush=True)
+        return None
 
 
 def _anchor_rect(anchor: dict) -> tuple[int, int, int, int]:
@@ -328,6 +383,18 @@ def _is_terminal(wm_class: str) -> bool:
     return wm_class in terminal_classes or 'terminal' in wm_class
 
 
+def _is_vscode_terminal_context(wm_class: str, focus_hints: dict | None) -> bool:
+    if (wm_class or '').lower() not in {'code', 'code-oss'}:
+        return False
+    if not focus_hints:
+        return False
+    haystack = ' '.join(
+        str(focus_hints.get(key, '') or '').lower()
+        for key in ('app', 'role', 'name', 'description')
+    )
+    return 'terminal' in haystack
+
+
 def _paste_key_for(wm_class: str) -> str:
     return 'ctrl+shift+v' if _is_terminal(wm_class) else 'ctrl+v'
 
@@ -343,7 +410,12 @@ class ClipboardPopup(Adw.Window):
         self._monitor = monitor
         self._caret_tracker = caret_tracker
         self._active_wm_class = ''
+        self._focus_hints: dict[str, str] = {}
         self._x11_configured = False  # skip-taskbar hint only needed once
+        self._position_mode = POSITION_OS_DEFAULT
+        self._wayland_positioning = False
+        self._load_settings()
+        self._position_buttons: dict[str, Gtk.CheckButton] = {}
 
         self._build_ui()
         self._connect_signals()
@@ -369,6 +441,14 @@ class ClipboardPopup(Adw.Window):
         # Header bar
         header = Adw.HeaderBar()
         header.set_show_back_button(False)
+
+        settings_btn = Gtk.MenuButton()
+        settings_btn.set_icon_name('emblem-system-symbolic')
+        settings_btn.set_tooltip_text('Settings')
+        settings_btn.add_css_class('flat')
+        settings_btn.add_css_class('circular')
+        settings_btn.set_popover(self._make_settings_popover())
+        header.pack_end(settings_btn)
 
         clear_btn = Gtk.Button()
         clear_btn.set_icon_name('edit-clear-all-symbolic')
@@ -421,6 +501,86 @@ class ClipboardPopup(Adw.Window):
 
         self.set_content(toolbar_view)
 
+    def _make_settings_popover(self) -> Gtk.Popover:
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        title = Gtk.Label(label='Settings')
+        title.set_halign(Gtk.Align.START)
+        title.add_css_class('heading')
+        box.append(title)
+
+        group = None
+        for mode in POSITION_OPTIONS:
+            btn = Gtk.CheckButton(label=POSITION_LABELS[mode])
+            btn.set_halign(Gtk.Align.START)
+            if group is not None:
+                btn.set_group(group)
+            else:
+                group = btn
+            btn.set_active(mode == self._position_mode)
+            btn.connect('toggled', self._on_position_mode_toggled, mode)
+            self._position_buttons[mode] = btn
+            box.append(btn)
+
+        # Wayland Experimental Toggle
+        if _ON_WAYLAND:
+            sep = Gtk.Separator()
+            sep.set_margin_top(4)
+            sep.set_margin_bottom(4)
+            box.append(sep)
+
+            wl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            wl_lbl = Gtk.Label(label='Wayland Caret Positioning\n(Experimental)')
+            wl_lbl.set_halign(Gtk.Align.START)
+            wl_lbl.add_css_class('caption')
+            wl_switch = Gtk.Switch()
+            wl_switch.set_active(self._wayland_positioning)
+            wl_switch.set_valign(Gtk.Align.CENTER)
+            wl_switch.connect('notify::active', self._on_wayland_pos_toggled)
+
+            wl_box.append(wl_lbl)
+            wl_box.append(wl_switch)
+            box.append(wl_box)
+
+        popover.set_child(box)
+        return popover
+
+    def _load_settings(self) -> None:
+        try:
+            if not SETTINGS_PATH.exists():
+                return
+            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            mode = settings.get('popup_position', POSITION_OS_DEFAULT)
+            if mode in POSITION_OPTIONS:
+                self._position_mode = mode
+            self._wayland_positioning = bool(settings.get('wayland_positioning', False))
+        except Exception as e:
+            print(f'[popup] settings load failed: {e}', flush=True)
+
+    def _save_settings(self) -> None:
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            settings = {}
+            if SETTINGS_PATH.exists():
+                try:
+                    with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                        settings = json.load(f)
+                except Exception:
+                    settings = {}
+            settings['popup_position'] = self._position_mode
+            settings['wayland_positioning'] = self._wayland_positioning
+            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2)
+                f.write('\n')
+        except Exception as e:
+            print(f'[popup] settings save failed: {e}', flush=True)
+
     def _connect_signals(self):
         # Close on focus loss
         self.connect('notify::is-active', self._on_active_changed)
@@ -446,10 +606,27 @@ class ClipboardPopup(Adw.Window):
         self._active_wm_class = _get_active_window_class()
         if not self._active_wm_class and self._caret_tracker:
             self._active_wm_class = self._caret_tracker.get_app_name()
+        self._focus_hints = {}
+        if self._caret_tracker:
+            try:
+                self._focus_hints = self._caret_tracker.get_focus_hints()
+            except Exception as e:
+                print(f'[popup] focus hints failed: {e}', flush=True)
         print(f'[popup] active wm_class={self._active_wm_class!r}', flush=True)
+        if self._focus_hints:
+            print(f'[popup] focus hints={self._focus_hints!r}', flush=True)
 
         n = len(self._db.get_entries(limit=100))
         ideal_h = min(750, max(200, n * 80 + 80))
+        self.set_default_size(POPUP_WIDTH, ideal_h)
+
+        if self._position_mode == POSITION_OS_DEFAULT and not self._wayland_positioning:
+            print('[popup] position mode: OS default; letting window manager place popup', flush=True)
+            self._populate()
+            self.present()
+            GLib.idle_add(self._reveal)
+            return
+
         anchor = self._best_anchor()
         popup_h = _popup_height_for_anchor(anchor, ideal_h)
         self.set_default_size(POPUP_WIDTH, popup_h)
@@ -470,6 +647,9 @@ class ClipboardPopup(Adw.Window):
             xid = surface.get_xid()
             print(f'[popup] X11 surface xid=0x{xid:x} — calling pre_map_window', flush=True)
             _pre_map_window(xid, px, py)
+        elif self._wayland_positioning:
+            print('[popup] Wayland surface with experimental positioning', flush=True)
+            self._wl_move(px, py)
         else:
             print('[popup] Wayland surface — skipping X11 positioning', flush=True)
 
@@ -479,6 +659,27 @@ class ClipboardPopup(Adw.Window):
 
     def _best_anchor(self) -> dict:
         """Return caret/focused-text/window/fallback anchor metadata."""
+        if self._position_mode == POSITION_MOUSE:
+            anchor = _mouse_anchor()
+            if anchor:
+                return anchor
+            print('[popup] mouse placement unavailable; falling back', flush=True)
+
+        if self._position_mode == POSITION_WINDOW:
+            if self._caret_tracker:
+                try:
+                    win = self._caret_tracker.get_window_geometry()
+                    if win:
+                        return _make_anchor(
+                            'window',
+                            'manual',
+                            win,
+                            self._caret_tracker.get_app_name()
+                        )
+                except Exception as e:
+                    print(f'[popup] window anchor failed: {e}', flush=True)
+            print('[popup] window placement unavailable; falling back', flush=True)
+
         if self._caret_tracker:
             try:
                 anchor = self._caret_tracker.get_anchor()
@@ -489,9 +690,27 @@ class ClipboardPopup(Adw.Window):
         print('[popup] fallback: primary monitor command palette', flush=True)
         return _fallback_anchor()
 
+    def _on_position_mode_toggled(self, btn, mode: str):
+        if not btn.get_active() or mode == self._position_mode:
+            return
+        self._position_mode = mode
+        self._save_settings()
+        print(f'[popup] popup_position={mode}', flush=True)
+
+    def _on_wayland_pos_toggled(self, sw, pspec):
+        self._wayland_positioning = sw.get_active()
+        self._save_settings()
+        print(f'[popup] wayland_positioning={self._wayland_positioning}', flush=True)
+
     def _move_and_reveal(self) -> bool:
         self._xmove(self._target_x, self._target_y)
-        GLib.timeout_add(80, self._reveal)  # give compositor time to apply the move
+        GLib.timeout_add(60, self._retry_xmove)
+        GLib.timeout_add(160, self._retry_xmove)
+        GLib.timeout_add(240, self._reveal)  # give compositor time to apply the move
+        return False
+
+    def _retry_xmove(self) -> bool:
+        self._xmove(self._target_x, self._target_y)
         return False
 
     def _reveal(self) -> bool:
@@ -508,7 +727,9 @@ class ClipboardPopup(Adw.Window):
         """Move the X11 window to (px, py). No-op on Wayland."""
         surface = self.get_surface()
         if not isinstance(surface, GdkX11.X11Surface):
-            print('[popup] _xmove: Wayland surface, cannot move', flush=True)
+            # Try Wayland move if enabled
+            if self._wayland_positioning:
+                self._wl_move(px, py)
             return
 
         xid = surface.get_xid()
@@ -524,6 +745,20 @@ class ClipboardPopup(Adw.Window):
             surface.set_skip_taskbar_hint(True)
             surface.set_skip_pager_hint(True)
             self._x11_configured = True
+
+    def _wl_move(self, px: int, py: int):
+        """Attempt to move the window on Wayland via GNOME Shell extension DBus."""
+        if not _ON_WAYLAND:
+            return
+        try:
+            # This requires a companion GNOME Shell extension to be installed
+            # that provides org.gnome.Shell.MoveWindow.
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            # Placeholder for future extension call
+            # bus.call_sync(...)
+            pass
+        except Exception:
+            pass
 
     # ── List population ──────────────────────────────────────────────────────
 
@@ -650,6 +885,15 @@ class ClipboardPopup(Adw.Window):
         content = row._content
         image_path = row._image_path
         wm_class = self._active_wm_class
+        is_terminal = (
+            type_ == 'text'
+            and content
+            and (
+                _is_terminal(wm_class)
+                or _is_vscode_terminal_context(wm_class, self._focus_hints)
+            )
+        )
+        paste_delay_ms = 700 if is_terminal else 400
 
         clipboard = Gdk.Display.get_default().get_clipboard()
 
@@ -657,10 +901,11 @@ class ClipboardPopup(Adw.Window):
         # selection when it is claimed. wl-copy runs as a daemon and keeps
         # the content alive on the Wayland side after our window disappears.
         if type_ == 'text' and content:
-            h = hashlib.sha256(content.encode()).hexdigest()
+            paste_text = content.rstrip('\n') if is_terminal else content
+            h = hashlib.sha256(paste_text.encode()).hexdigest()
             self._monitor.set_skip_hash(h)
-            clipboard.set(content)
-            _wl_copy_text(content)
+            clipboard.set(paste_text)
+            _wl_copy_text(paste_text)
         elif type_ == 'image' and image_path and os.path.exists(image_path):
             try:
                 texture = Gdk.Texture.new_from_filename(image_path)
@@ -673,20 +918,15 @@ class ClipboardPopup(Adw.Window):
 
         self.set_visible(False)
 
-        # For terminals: strip trailing newline (prevents auto-execute) then paste
-        # normally with ctrl+shift+v.  xdotool type uses XSendEvent and is silently
-        # ignored by Wayland-native windows; xdotool key (XTEST) is forwarded by
-        # Mutter to the focused window regardless of backend.
-        if type_ == 'text' and content and _is_terminal(wm_class):
-            safe = content.rstrip('\n')
-            clipboard.set(safe)
-            _wl_copy_text(safe)
+        # Terminals use Ctrl+Shift+V and get a slightly longer delay because focus
+        # can briefly bounce while the popup hides under GNOME/Mutter.
+        if is_terminal:
             key = 'ctrl+shift+v'
             print(f'[popup] terminal paste into {wm_class!r} using {key}', flush=True)
         else:
             key = _paste_key_for(wm_class)
             print(f'[popup] normal paste into {wm_class!r} using {key}', flush=True)
-        GLib.timeout_add(400, self._do_paste, key)
+        GLib.timeout_add(paste_delay_ms, self._do_paste, key)
 
     def _do_paste(self, key: str) -> bool:
         if _ON_WAYLAND:

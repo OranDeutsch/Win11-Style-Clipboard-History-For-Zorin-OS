@@ -13,7 +13,9 @@ _atspi = None
 _listener = None
 _win_listener = None
 
-# Active window bounds (updated on window:activate)
+from gi.repository import Gio, GLib
+
+# Active window bounds (updated on window:activate or via Introspect)
 _win_x: int = 0
 _win_y: int = 0
 _win_w: int = 0
@@ -28,6 +30,9 @@ _focus_w: int = 0
 _focus_h: int = 0
 _focus_ts: float = 0.0
 _focus_app: str = ''
+_focus_role: str = ''
+_focus_name: str = ''
+_focus_description: str = ''
 
 # Caret bounds (updated on object:text-caret-moved)
 _caret_x: int = 0
@@ -36,7 +41,19 @@ _caret_w: int = 0
 _caret_h: int = 0
 _caret_ts: float = 0.0
 _caret_app: str = ''
+
+# IBus caret tracking (often absolute screen coords on Wayland)
+_ibus_x: int = 0
+_ibus_y: int = 0
+_ibus_w: int = 0
+_ibus_h: int = 0
+_ibus_ts: float = 0.0
+
 _last_scan_ts: float = 0.0
+
+# DBus proxies
+_ibus_proxy = None
+_introspect_proxy = None
 
 
 class Anchor(TypedDict):
@@ -53,6 +70,12 @@ class Anchor(TypedDict):
 def start() -> bool:
     print('[caret] start() called', flush=True)
     global _atspi, _listener, _win_listener
+
+    # Start IBus listener
+    _start_ibus_listener()
+
+    # Start GNOME Introspect proxy
+    _start_introspect_proxy()
 
     try:
         import subprocess
@@ -95,6 +118,92 @@ def start() -> bool:
         return False
 
 
+def _start_ibus_listener():
+    """Listen for IBus SetCursorLocation signals."""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.signal_subscribe(
+            None,  # sender
+            'org.freedesktop.IBus.Panel',
+            'SetCursorLocation',
+            None,  # object path
+            None,  # arg0
+            Gio.DBusSignalFlags.NONE,
+            _on_ibus_signal,
+            None
+        )
+        print('[caret] IBus signal subscription active', flush=True)
+    except Exception as e:
+        print(f'[caret] IBus subscription failed: {e}', flush=True)
+
+
+def _on_ibus_signal(connection, sender_name, object_path, interface_name, signal_name, parameters, user_data):
+    global _ibus_x, _ibus_y, _ibus_w, _ibus_h, _ibus_ts
+    try:
+        # parameters is a GLib.Variant (x, y, w, h)
+        x, y, w, h = parameters.unpack()
+        # IBus coords are often absolute screen coords on Wayland GNOME.
+        if x != 0 or y != 0:
+            _ibus_x, _ibus_y, _ibus_w, _ibus_h = x, y, w, h
+            _ibus_ts = time.monotonic()
+    except Exception:
+        pass
+
+
+def _start_introspect_proxy():
+    global _introspect_proxy
+    try:
+        _introspect_proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SESSION,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            'org.gnome.Shell.Introspect',
+            '/org/gnome/Shell/Introspect',
+            'org.gnome.Shell.Introspect',
+            None
+        )
+    except Exception as e:
+        print(f'[caret] Introspect proxy failed: {e}', flush=True)
+
+
+def _update_window_from_introspect():
+    """Query GNOME Shell for the active window's absolute position."""
+    global _win_x, _win_y, _win_w, _win_h, _win_app, _win_ts
+    if not _introspect_proxy:
+        return
+
+    try:
+        # GetWindows returns a dict {id: {title, wm_class, ...}}
+        # But we actually want the focus state.
+        # Introspect doesn't have a direct "GetActiveWindow" but we can look for
+        # the window that has is-active=true.
+        # Wait, Introspect's GetWindows returns (a{sv}a{sv}) usually?
+        # Let's check the actual signature. It's often:
+        # GetWindows() -> (a{sv} windows)
+        result = _introspect_proxy.call_sync(
+            'GetWindows',
+            None,
+            Gio.DBusCallFlags.NONE,
+            100,
+            None
+        )
+        if not result:
+            return
+
+        windows = result.unpack()[0]
+        for win_id, props in windows.items():
+            if props.get('has-focus') or props.get('is-active'):
+                _win_x = int(props.get('x', _win_x))
+                _win_y = int(props.get('y', _win_y))
+                _win_w = int(props.get('width', _win_w))
+                _win_h = int(props.get('height', _win_h))
+                _win_app = str(props.get('wm-class', _win_app)).lower()
+                _win_ts = time.monotonic()
+                break
+    except Exception:
+        pass
+
+
 def _on_window_event(event, _user_data) -> None:
     global _win_x, _win_y, _win_w, _win_h, _win_app, _win_ts
     try:
@@ -102,6 +211,12 @@ def _on_window_event(event, _user_data) -> None:
         if obj is None:
             return
         extents = obj.get_extents(_atspi.CoordType.SCREEN)
+        
+        # On Wayland, if we get (0,0), try Introspect
+        if extents.x == 0 and extents.y == 0:
+            _update_window_from_introspect()
+            return
+
         # Ignore dropdowns, tooltips, and context menus — they're too small
         # to be the main application window and would corrupt our position cache.
         if extents.width < 400 or extents.height < 200:
@@ -130,6 +245,7 @@ def _on_caret_event(event, _user_data) -> None:
         obj = event.source
         if obj is None:
             return
+        _record_focus_metadata(obj)
         text = obj.get_text_iface()
         if text is None:
             return
@@ -244,6 +360,7 @@ def _record_focus_object(obj, reason: str) -> None:
             _win_app = name
     except Exception:
         pass
+    _record_focus_metadata(obj)
 
     focused = _safe_extents(obj)
     if focused:
@@ -274,6 +391,27 @@ def _record_focus_object(obj, reason: str) -> None:
             f'→ {_focus_x},{_focus_y} {_focus_w}x{_focus_h}',
             flush=True,
         )
+
+
+def _record_focus_metadata(obj) -> None:
+    global _focus_role, _focus_name, _focus_description
+
+    try:
+        role = obj.get_role_name() or ''
+    except Exception:
+        role = ''
+    try:
+        name = obj.get_name() or ''
+    except Exception:
+        name = ''
+    try:
+        description = obj.get_description() or ''
+    except Exception:
+        description = ''
+
+    _focus_role = role.lower()
+    _focus_name = name.lower()
+    _focus_description = description.lower()
 
 
 def _safe_extents(obj) -> Optional[tuple[int, int, int, int]]:
@@ -339,8 +477,20 @@ def get_app_name() -> str:
     return _win_app
 
 
+def get_focus_hints() -> dict[str, str]:
+    """Return metadata about the currently focused accessible object."""
+    _refresh_from_desktop()
+    return {
+        'app': _win_app,
+        'role': _focus_role,
+        'name': _focus_name,
+        'description': _focus_description,
+    }
+
+
 def get_window_geometry() -> Optional[tuple[int, int, int, int]]:
     """Return (x, y, width, height) of the last activated window, or None."""
+    _update_window_from_introspect()
     if _win_w > 0 and _win_h > 0:
         return (_win_x, _win_y, _win_w, _win_h)
     return None
@@ -349,26 +499,40 @@ def get_window_geometry() -> Optional[tuple[int, int, int, int]]:
 def get_anchor() -> Optional[Anchor]:
     """Return the best current popup anchor with confidence metadata."""
     _refresh_from_desktop()
+    _update_window_from_introspect()
     now = time.monotonic()
 
+    # 1. Prefer IBus absolute coords if fresh
+    if _ibus_ts > 0 and now - _ibus_ts < 2.0:
+        return _anchor('ibus', 'high', (_ibus_x, _ibus_y, _ibus_w, _ibus_h), _ibus_ts)
+
+    # 2. Prefer AT-SPI caret
     caret_rect = (_caret_x, _caret_y, _caret_w, _caret_h)
-    if (
-        _caret_w > 0 and _caret_h > 0
-        and now - _caret_ts < 8.0
-        and _same_app(_caret_app)
-        and _inside_window(*caret_rect)
-    ):
-        return _anchor('caret', 'high', caret_rect, _caret_ts)
+    
+    # On Wayland, if caret is relative, fuse with window position
+    if _caret_w > 0 and _caret_h > 0 and now - _caret_ts < 8.0:
+        cx, cy, cw, ch = caret_rect
+        # If coords are small or relative to window (heuristically detected)
+        # On Wayland GNOME, relative coords are common.
+        if (cx == 0 and cy == 0) or (cx < 2000 and cy < 2000 and not _inside_window(*caret_rect)):
+            if _win_w > 0:
+                caret_rect = (cx + _win_x, cy + _win_y, cw, ch)
 
+        if _same_app(_caret_app) and _inside_window(*caret_rect):
+            return _anchor('caret', 'high', caret_rect, _caret_ts)
+
+    # 3. Prefer focused-text
     focus_rect = (_focus_x, _focus_y, _focus_w, _focus_h)
-    if (
-        _focus_w > 0 and _focus_h > 0
-        and now - _focus_ts < 20.0
-        and _same_app(_focus_app)
-        and _inside_window(*focus_rect)
-    ):
-        return _anchor('focused-text', 'medium', focus_rect, _focus_ts)
+    if _focus_w > 0 and _focus_h > 0 and now - _focus_ts < 20.0:
+        fx, fy, fw, fh = focus_rect
+        if (fx == 0 and fy == 0) or (fx < 2000 and fy < 2000 and not _inside_window(*focus_rect)):
+            if _win_w > 0:
+                focus_rect = (fx + _win_x, fy + _win_y, fw, fh)
 
+        if _same_app(_focus_app) and _inside_window(*focus_rect):
+            return _anchor('focused-text', 'medium', focus_rect, _focus_ts)
+
+    # 4. Fallback to active window
     win = get_window_geometry()
     if win:
         return _anchor('window', 'low', win, _win_ts)
