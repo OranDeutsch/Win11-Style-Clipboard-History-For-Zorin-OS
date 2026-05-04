@@ -1,29 +1,67 @@
-/* Clipboard History popup styles */
+/* Defer color, contrast, and focus treatment to the active GTK/Zorin theme. */
 
-.ch-preview {
-    font-size: 0.93em;
+window {
+    background: @theme_bg_color;
+    color: @theme_fg_color;
 }
 
-.ch-pinned-text {
-    font-weight: 600;
+headerbar {
+    background: @theme_bg_color;
+    color: @theme_fg_color;
+    box-shadow: inset 0 -1px @borders;
 }
 
-/* Tighten boxed-list rows a bit */
-.boxed-list > row {
-    min-height: 52px;
+popover,
+popover contents {
+    background: @theme_base_color;
+    color: @theme_fg_color;
+    border-color: @borders;
 }
 
-/* Search entry in header — give it breathing room */
 headerbar searchentry {
     min-width: 200px;
 }
 
-/* Dim the action buttons slightly so content takes focus */
+.boxed-list {
+    background: transparent;
+}
+
+.boxed-list > row {
+    min-height: 52px;
+    background: @theme_base_color;
+    color: @theme_fg_color;
+    border-color: @borders;
+}
+
+.boxed-list > row:selected {
+    background: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+
+.boxed-list > row:hover:not(:selected) {
+    background: alpha(@theme_fg_color, 0.06);
+}
+
+.ch-preview {
+    font-size: 0.93em;
+    color: inherit;
+}
+
+.ch-pinned-text {
+    font-weight: 600;
+    color: @theme_selected_bg_color;
+}
+
+.boxed-list > row:selected .ch-pinned-text {
+    color: @theme_selected_fg_color;
+}
+
 .boxed-list > row > box > button.flat {
-    opacity: 0.6;
+    opacity: 0.64;
 }
 
 .boxed-list > row:selected > box > button.flat {
+    color: @theme_selected_fg_color;
     opacity: 0.9;
 }
 
