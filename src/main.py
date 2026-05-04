@@ -88,7 +88,7 @@ class ClipboardHistoryApp(Adw.Application):
 
         # Toggle visibility if already open
         if self._popup and self._popup.get_visible():
-            self._popup.set_visible(False)
+            self._popup.hide_popup()
             return GLib.SOURCE_REMOVE
 
         if self._popup is None:

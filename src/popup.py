@@ -1,9 +1,8 @@
 """
 Main UI and Popup Logic for Clipboard History.
 
-This module handles the GTK4/libadwaita interface, window positioning strategies
-(including X11 pre-map hacks and experimental Wayland support), and the final
-paste injection via virtual keyboard.
+This module handles the GTK4/libadwaita interface, window positioning strategies,
+and the final paste injection via virtual keyboard.
 """
 import subprocess
 import hashlib
@@ -232,13 +231,16 @@ def _mouse_anchor() -> dict | None:
             if '=' not in line:
                 continue
             key, value = line.split('=', 1)
-            if key in ('X', 'Y'):
+            if key in ('X', 'Y', 'WINDOW'):
                 vals[key] = int(value)
 
         if 'X' not in vals or 'Y' not in vals:
             return None
 
-        return _make_anchor('mouse', 'manual', (vals['X'], vals['Y'], 1, 1))
+        anchor = _make_anchor('mouse', 'manual', (vals['X'], vals['Y'], 1, 1))
+        if vals.get('WINDOW', 0) > 0:
+            anchor['window_id'] = vals['WINDOW']
+        return anchor
     except Exception as e:
         print(f'[popup] mouse anchor failed: {e}', flush=True)
         return None
@@ -339,6 +341,19 @@ def _get_active_window_class() -> str:
     return ''
 
 
+def _get_window_class(window_id: int) -> str:
+    try:
+        result = subprocess.run(
+            ['xdotool', 'getwindowclassname', str(window_id)],
+            capture_output=True,
+            text=True,
+            timeout=0.5,
+        )
+        return result.stdout.strip().lower()
+    except Exception:
+        return ''
+
+
 def _is_terminal(wm_class: str) -> bool:
     """Check if the given window class represents a terminal emulator."""
     wm_class = (wm_class or '').lower()
@@ -402,9 +417,11 @@ class ClipboardPopup(Adw.Window):
         self._caret_tracker = caret_tracker
         self._active_wm_class = ''
         self._focus_hints: dict[str, str] = {}
+        self._paste_window_id: int | None = None
         self._x11_configured = False
         self._position_mode = POSITION_OS_DEFAULT
-        self._wayland_positioning = False
+        self._settings_popover: Gtk.Popover | None = None
+        self._dialog_open = False
         self._load_settings()
         self._position_buttons: dict[str, Gtk.CheckButton] = {}
 
@@ -438,7 +455,8 @@ class ClipboardPopup(Adw.Window):
         settings_btn.set_tooltip_text('Settings')
         settings_btn.add_css_class('flat')
         settings_btn.add_css_class('circular')
-        settings_btn.set_popover(self._make_settings_popover())
+        self._settings_popover = self._make_settings_popover()
+        settings_btn.set_popover(self._settings_popover)
         header.pack_end(settings_btn)
 
         clear_btn = Gtk.Button()
@@ -513,17 +531,6 @@ class ClipboardPopup(Adw.Window):
             self._position_buttons[mode] = btn
             box.append(btn)
 
-        if _ON_WAYLAND:
-            box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
-            wl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            wl_lbl = Gtk.Label(label='Wayland Caret Positioning\n(Experimental)', halign=Gtk.Align.START)
-            wl_lbl.add_css_class('caption')
-            wl_switch = Gtk.Switch(active=self._wayland_positioning, valign=Gtk.Align.CENTER)
-            wl_switch.connect('notify::active', self._on_wayland_pos_toggled)
-            wl_box.append(wl_lbl); wl_box.append(wl_switch)
-            box.append(wl_box)
-
-        # Delete All History Button
         box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
         del_all_btn = Gtk.Button(label='Delete All History')
         del_all_btn.add_css_class('destructive-action')
@@ -534,6 +541,8 @@ class ClipboardPopup(Adw.Window):
         return popover
 
     def _on_delete_all_clicked(self, btn):
+        self._close_settings_popover()
+        self._dialog_open = True
         dialog = Adw.AlertDialog.new('Delete All History?', 'This will permanently remove ALL clipboard entries, including pinned ones.')
         dialog.add_response('cancel', 'Cancel'); dialog.add_response('delete', 'Delete All')
         dialog.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE)
@@ -541,6 +550,7 @@ class ClipboardPopup(Adw.Window):
         dialog.present(self)
 
     def _on_delete_all_confirmed(self, dialog, response):
+        self._dialog_open = False
         if response == 'delete':
             self._db.clear_all()
             self._populate()
@@ -554,7 +564,6 @@ class ClipboardPopup(Adw.Window):
             mode = settings.get('popup_position', POSITION_OS_DEFAULT)
             if mode in POSITION_OPTIONS:
                 self._position_mode = mode
-            self._wayland_positioning = bool(settings.get('wayland_positioning', False))
         except Exception as e:
             print(f'[popup] settings load failed: {e}', flush=True)
 
@@ -569,7 +578,6 @@ class ClipboardPopup(Adw.Window):
                 except Exception:
                     settings = {}
             settings['popup_position'] = self._position_mode
-            settings['wayland_positioning'] = self._wayland_positioning
             with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
                 f.write('\n')
@@ -594,8 +602,10 @@ class ClipboardPopup(Adw.Window):
         surface = self.get_surface()
 
         self._active_wm_class = _get_active_window_class()
-        if not self._active_wm_class and self._caret_tracker:
-            self._active_wm_class = self._caret_tracker.get_app_name()
+        if self._caret_tracker:
+            tracked_app = self._caret_tracker.get_app_name()
+            if (not self._active_wm_class or self._active_wm_class == 'gnome-shell') and tracked_app != 'gnome-shell':
+                self._active_wm_class = tracked_app
         self._focus_hints = {}
         if self._caret_tracker:
             try:
@@ -607,7 +617,7 @@ class ClipboardPopup(Adw.Window):
         ideal_h = min(750, max(200, n * 80 + 80))
         self.set_default_size(POPUP_WIDTH, ideal_h)
 
-        if self._position_mode == POSITION_OS_DEFAULT and not self._wayland_positioning:
+        if self._position_mode == POSITION_OS_DEFAULT:
             print('[popup] position mode: OS default; letting window manager place popup', flush=True)
             self._populate()
             self.present()
@@ -615,6 +625,11 @@ class ClipboardPopup(Adw.Window):
             return
 
         anchor = self._best_anchor()
+        self._paste_window_id = anchor.get('window_id') if anchor.get('source') == 'mouse' else None
+        if self._paste_window_id:
+            mouse_wm_class = _get_window_class(self._paste_window_id)
+            if mouse_wm_class:
+                self._active_wm_class = mouse_wm_class
         popup_h = _popup_height_for_anchor(anchor, ideal_h)
         self.set_default_size(POPUP_WIDTH, popup_h)
         px, py = _position_for_anchor(anchor, popup_h)
@@ -623,8 +638,6 @@ class ClipboardPopup(Adw.Window):
         if isinstance(surface, GdkX11.X11Surface):
             xid = surface.get_xid()
             _pre_map_window(xid, px, py)
-        elif self._wayland_positioning:
-            self._wl_move(px, py)
 
         self._populate()
         self.present()
@@ -676,10 +689,16 @@ class ClipboardPopup(Adw.Window):
         self._save_settings()
         print(f'[popup] popup_position={mode}', flush=True)
 
-    def _on_wayland_pos_toggled(self, sw, pspec):
-        self._wayland_positioning = sw.get_active()
-        self._save_settings()
-        print(f'[popup] wayland_positioning={self._wayland_positioning}', flush=True)
+    def _close_settings_popover(self) -> None:
+        if self._settings_popover and self._settings_popover.get_visible():
+            self._settings_popover.popdown()
+
+    def _hide_popup(self) -> None:
+        self._close_settings_popover()
+        self.set_visible(False)
+
+    def hide_popup(self) -> None:
+        self._hide_popup()
 
     def _move_and_reveal(self) -> bool:
         self._xmove(self._target_x, self._target_y)
@@ -706,8 +725,6 @@ class ClipboardPopup(Adw.Window):
         """Move the X11 window to (px, py). No-op on Wayland."""
         surface = self.get_surface()
         if not isinstance(surface, GdkX11.X11Surface):
-            if self._wayland_positioning:
-                self._wl_move(px, py)
             return
 
         xid = surface.get_xid()
@@ -717,10 +734,6 @@ class ClipboardPopup(Adw.Window):
             surface.set_skip_taskbar_hint(True)
             surface.set_skip_pager_hint(True)
             self._x11_configured = True
-
-    def _wl_move(self, px: int, py: int):
-        """Placeholder for Wayland window movement (requires companion extension)."""
-        pass
 
     # ── List population ──────────────────────────────────────────────────────
 
@@ -826,17 +839,37 @@ class ClipboardPopup(Adw.Window):
             self._monitor.set_skip_hash('image')
             clipboard.set(Gdk.Texture.new_from_filename(image_path)); _wl_copy_image(image_path)
 
-        self.set_visible(False)
+        self._hide_popup()
         key = 'ctrl+shift+v' if is_terminal else _paste_key_for(wm_class)
         GLib.timeout_add(700 if is_terminal else 400, self._do_paste, key)
 
     def _do_paste(self, key: str) -> bool:
+        self._focus_paste_target()
         import uinput_kbd
         if _ON_WAYLAND:
             if uinput_kbd.inject_key(key): return False
             if _HAS_YDOTOOL: subprocess.run(['ydotool', 'key', '--delay', '0', key]); return False
         subprocess.run(['xdotool', 'key', '--clearmodifiers', key])
         return False
+
+    def _focus_paste_target(self) -> None:
+        if not self._paste_window_id:
+            return
+        try:
+            popup_xid = None
+            surface = self.get_surface()
+            if isinstance(surface, GdkX11.X11Surface):
+                popup_xid = surface.get_xid()
+            if popup_xid and self._paste_window_id == popup_xid:
+                return
+            subprocess.run(
+                ['xdotool', 'windowactivate', '--sync', str(self._paste_window_id)],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+        except Exception as e:
+            print(f'[popup] focus paste target failed: {e}', flush=True)
 
     def _on_pin_clicked(self, btn, row):
         self._db.toggle_pin(row._entry_id)
@@ -848,6 +881,8 @@ class ClipboardPopup(Adw.Window):
         self._populate()
 
     def _on_clear(self, btn):
+        self._close_settings_popover()
+        self._dialog_open = True
         dialog = Adw.AlertDialog.new('Clear History?', 'All unpinned clipboard entries will be deleted.')
         dialog.add_response('cancel', 'Cancel'); dialog.add_response('clear', 'Clear')
         dialog.set_response_appearance('clear', Adw.ResponseAppearance.DESTRUCTIVE)
@@ -855,6 +890,7 @@ class ClipboardPopup(Adw.Window):
         dialog.present(self)
 
     def _on_clear_confirmed(self, dialog, response):
+        self._dialog_open = False
         if response == 'clear':
             self._db.clear_unpinned()
             self._populate()
@@ -862,16 +898,22 @@ class ClipboardPopup(Adw.Window):
     # ── Focus / Keyboard ─────────────────────────────────────────────────────
 
     def _on_active_changed(self, window, pspec):
-        if not self.is_active(): GLib.timeout_add(100, self._check_still_inactive)
+        if not self.is_active():
+            GLib.timeout_add(100, self._check_still_inactive)
 
     def _check_still_inactive(self) -> bool:
-        if not self.is_active(): self.set_visible(False)
+        if self._settings_popover and self._settings_popover.get_visible():
+            return False
+        if self._dialog_open:
+            return False
+        if not self.is_active():
+            self._hide_popup()
         return False
 
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
         if self._search_entry.has_focus() and keyval not in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Delete):
             return False
-        if keyval == Gdk.KEY_Escape: self.set_visible(False); return True
+        if keyval == Gdk.KEY_Escape: self._hide_popup(); return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             row = self._list_box.get_selected_row()
             if row: self._paste_row(row)
