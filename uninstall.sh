@@ -5,7 +5,6 @@ BIN_DIR="$HOME/.local/bin"
 LIB_DIR="$HOME/.local/lib/clipboard-history"
 SERVICE_DIR="$HOME/.config/systemd/user"
 DATA_DIR="$HOME/.local/share/clipboard-history"
-EXT_UUID="clipboard-history-rust@missionzero.dev"
 MK_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 CH_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 
@@ -16,14 +15,8 @@ systemctl --user stop clipboard-history 2>/dev/null || true
 systemctl --user disable clipboard-history 2>/dev/null || true
 
 # Remove files
-gnome-extensions disable "$EXT_UUID" 2>/dev/null || true
-gnome-extensions disable "clipboard-history-gjs@missionzero.dev" 2>/dev/null || true
-gnome-extensions disable "clipboard-history-rust@missionzero" 2>/dev/null || true
 rm -f "$BIN_DIR/clipboard-history" "$BIN_DIR/clipboard-history-show"
 rm -rf "$LIB_DIR"
-rm -rf "$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
-rm -rf "$HOME/.local/share/gnome-shell/extensions/clipboard-history-gjs@missionzero.dev"
-rm -rf "$HOME/.local/share/gnome-shell/extensions/clipboard-history-rust@missionzero"
 rm -f "$SERVICE_DIR/clipboard-history.service"
 systemctl --user daemon-reload
 

@@ -17,20 +17,25 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 gi.require_version('Adw', '1')
-gi.require_version('GdkX11', '4.0')
-from gi.repository import Gtk, Gdk, Adw, GLib, GdkX11, Pango
+try:
+    gi.require_version('GdkX11', '4.0')
+    from gi.repository import GdkX11
+except (ImportError, ValueError):
+    GdkX11 = None
+from gi.repository import Gtk, Gdk, Adw, GLib, Pango
 
 
 def _is_x11() -> bool:
     """Check if the current GDK display is X11."""
     try:
-        return isinstance(Gdk.Display.get_default(), GdkX11.X11Display)
+        return GdkX11 is not None and isinstance(Gdk.Display.get_default(), GdkX11.X11Display)
     except Exception:
         return False
 
 
-# Detect Wayland environment (even if running via XWayland)
+# Detect Wayland session. The GDK backend may still be X11 when forced through XWayland.
 _ON_WAYLAND: bool = bool(os.environ.get('WAYLAND_DISPLAY'))
+_HAS_XDOTOOL: bool = shutil.which('xdotool') is not None
 _HAS_YDOTOOL: bool = shutil.which('ydotool') is not None
 
 POPUP_WIDTH = 580
@@ -57,6 +62,18 @@ POSITION_LABELS = {
 
 
 # --- X11 Positioning Hacks ---
+
+def _is_x11_surface(surface) -> bool:
+    return GdkX11 is not None and isinstance(surface, GdkX11.X11Surface)
+
+
+def _backend_name() -> str:
+    display = Gdk.Display.get_default()
+    if GdkX11 is not None and isinstance(display, GdkX11.X11Display):
+        return 'x11'
+    if _ON_WAYLAND:
+        return 'wayland'
+    return type(display).__name__
 
 class _XSizeHints(ctypes.Structure):
     """Ctype structure for X11 WM_NORMAL_HINTS."""
@@ -221,6 +238,8 @@ def _make_anchor(source: str, confidence: str, rect: tuple[int, int, int, int],
 
 def _mouse_anchor() -> dict | None:
     """Get anchor at current mouse position via xdotool."""
+    if not (_is_x11() and _HAS_XDOTOOL):
+        return None
     try:
         result = subprocess.run(
             ['xdotool', 'getmouselocation', '--shell'],
@@ -316,6 +335,9 @@ def _position_for_anchor(anchor: dict, popup_h: int) -> tuple[int, int]:
 
 def _get_active_window_class() -> str:
     """Get the WM_CLASS of the currently focused window."""
+    if not (_is_x11() and _HAS_XDOTOOL):
+        return ''
+
     # Try xdotool active window first.
     try:
         result = subprocess.run(
@@ -348,6 +370,8 @@ def _get_active_window_class() -> str:
 
 
 def _get_window_class(window_id: int) -> str:
+    if not (_is_x11() and _HAS_XDOTOOL):
+        return ''
     try:
         result = subprocess.run(
             ['xdotool', 'getwindowclassname', str(window_id)],
@@ -735,6 +759,13 @@ class ClipboardPopup(Adw.Window):
         import os as _os
         disp = Gdk.Display.get_default()
         surface = self.get_surface()
+        print(
+            f'[popup] backend={_backend_name()} '
+            f'DISPLAY={_os.environ.get("DISPLAY")!r} '
+            f'WAYLAND_DISPLAY={_os.environ.get("WAYLAND_DISPLAY")!r} '
+            f'GDK_BACKEND={_os.environ.get("GDK_BACKEND")!r}',
+            flush=True,
+        )
 
         self._active_wm_class = _get_active_window_class()
         if self._caret_tracker:
@@ -770,9 +801,11 @@ class ClipboardPopup(Adw.Window):
         px, py = _position_for_anchor(anchor, popup_h)
         self._target_x, self._target_y = px, py
 
-        if isinstance(surface, GdkX11.X11Surface):
+        if _is_x11_surface(surface):
             xid = surface.get_xid()
             _pre_map_window(xid, px, py)
+        else:
+            print('[popup] native Wayland surface; compositor will choose final placement', flush=True)
 
         self._populate()
         self.present()
@@ -848,7 +881,7 @@ class ClipboardPopup(Adw.Window):
 
     def _reveal(self) -> bool:
         surface = self.get_surface()
-        if isinstance(surface, GdkX11.X11Surface):
+        if _is_x11_surface(surface):
             _restore_window_opacity(surface.get_xid())
         first = self._list_box.get_row_at_index(0)
         if first:
@@ -859,7 +892,7 @@ class ClipboardPopup(Adw.Window):
     def _xmove(self, px: int, py: int):
         """Move the X11 window to (px, py). No-op on Wayland."""
         surface = self.get_surface()
-        if not isinstance(surface, GdkX11.X11Surface):
+        if not (_is_x11_surface(surface) and _HAS_XDOTOOL):
             return
 
         xid = surface.get_xid()
@@ -981,19 +1014,22 @@ class ClipboardPopup(Adw.Window):
     def _do_paste(self, key: str) -> bool:
         self._focus_paste_target()
         import uinput_kbd
-        if _ON_WAYLAND:
+        if _ON_WAYLAND or not (_is_x11() and _HAS_XDOTOOL):
             if uinput_kbd.inject_key(key): return False
             if _HAS_YDOTOOL: subprocess.run(['ydotool', 'key', '--delay', '0', key]); return False
-        subprocess.run(['xdotool', 'key', '--clearmodifiers', key])
+        if _HAS_XDOTOOL:
+            subprocess.run(['xdotool', 'key', '--clearmodifiers', key])
         return False
 
     def _focus_paste_target(self) -> None:
         if not self._paste_window_id:
             return
+        if not (_is_x11() and _HAS_XDOTOOL):
+            return
         try:
             popup_xid = None
             surface = self.get_surface()
-            if isinstance(surface, GdkX11.X11Surface):
+            if _is_x11_surface(surface):
                 popup_xid = surface.get_xid()
             if popup_xid and self._paste_window_id == popup_xid:
                 return

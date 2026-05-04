@@ -29,7 +29,7 @@ import caret as caret_mod
 import uinput_kbd
 
 SOCKET_PATH = Path.home() / '.local' / 'share' / 'clipboard-history' / 'control.sock'
-APP_ID = 'tech.missionzero.clipboard-history'
+APP_ID = 'io.github.orandeutsch.clipboard-history'
 
 
 class ClipboardHistoryApp(Adw.Application):

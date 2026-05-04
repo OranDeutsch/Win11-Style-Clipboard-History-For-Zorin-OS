@@ -11,7 +11,7 @@ This is a desktop integration tool, not a sandboxed app. The installer adds a us
 ## Features
 
 - **Contextual Positioning**: Choose between **Caret** (near text cursor), **Mouse**, **Window**, or **OS Default** placement.
-- **Wayland Support**: Includes experimental support for accurate caret positioning on Wayland/GNOME using IBus and GNOME Introspect.
+- **X11 and Wayland Support**: Runs on either GTK backend. X11/XWayland supports explicit popup movement; native Wayland uses compositor placement with caret/window context as best-effort metadata.
 - **Rich History**: Stores text and image clipboard history in SQLite.
 - **Search & Filter**: Quickly find previous clips with an integrated search bar.
 - **Pinning**: Keep important clips at the top of the list.
@@ -26,6 +26,15 @@ Run:
 ```bash
 ./install.sh
 ```
+
+By default the installer uses `--backend auto`, which lets GTK choose the best backend for the current session. You can force one:
+
+```bash
+./install.sh --backend wayland
+./install.sh --backend x11
+```
+
+Use native Wayland for the most session-native behavior. Use `--backend x11` if you want XWayland's more precise popup movement and mouse-window targeting.
 
 ### Custom Hotkey
 
@@ -79,6 +88,7 @@ You can also change the hotkey live from the app:
 - **Check Service Status**: `systemctl --user status clipboard-history`
 - **View Logs**: `journalctl --user -u clipboard-history -f`
 - **Manual Show**: `clipboard-history --show`
+- **Backend Choice**: rerun `./install.sh --backend auto`, `./install.sh --backend wayland`, or `./install.sh --backend x11`.
 
 ## Uninstall
 

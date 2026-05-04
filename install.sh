@@ -2,13 +2,15 @@
 # Installation script for Clipboard History (Python/GTK4 version).
 #
 # Usage:
-#   ./install.sh [--hotkey "<Super>v"]
+#   ./install.sh [--hotkey "<Super>v"] [--backend auto|wayland|x11]
 #
 # Default hotkey is Super+V.
+# Default backend is auto, which lets GTK choose X11 or Wayland from the session.
 
 set -euo pipefail
 
 HOTKEY="<Super>v"
+BACKEND="auto"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -17,9 +19,22 @@ while [[ $# -gt 0 ]]; do
             HOTKEY="$2"
             shift 2
             ;;
+        --backend)
+            BACKEND="$2"
+            if [[ "$BACKEND" != "auto" && "$BACKEND" != "wayland" && "$BACKEND" != "x11" ]]; then
+                echo "Invalid backend: $BACKEND"
+                echo "Usage: $0 [--hotkey \"<Super>v\"] [--backend auto|wayland|x11]"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --xwayland)
+            BACKEND="x11"
+            shift
+            ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 [--hotkey \"<Super>v\"]"
+            echo "Usage: $0 [--hotkey \"<Super>v\"] [--backend auto|wayland|x11]"
             exit 1
             ;;
     esac
@@ -33,6 +48,7 @@ DATA_DIR="$HOME/.local/share/clipboard-history"
 
 echo "Installing Clipboard History..."
 echo "  Target Hotkey: $HOTKEY"
+echo "  GTK Backend: $BACKEND"
 
 # --- 1. System Dependencies ---
 echo "Checking dependencies..."
@@ -109,6 +125,11 @@ chmod +x "$BIN_DIR/clipboard-history-show"
 # --- 6. Systemd Service ---
 echo "  Setting up systemd service..."
 cp -f "$SCRIPT_DIR/clipboard-history.service" "$SERVICE_DIR/"
+if [[ "$BACKEND" == "x11" ]]; then
+    sed -i '/^Environment=XDG_RUNTIME_DIR=/a Environment=GDK_BACKEND=x11' "$SERVICE_DIR/clipboard-history.service"
+elif [[ "$BACKEND" == "wayland" ]]; then
+    sed -i '/^Environment=XDG_RUNTIME_DIR=/a Environment=GDK_BACKEND=wayland,x11' "$SERVICE_DIR/clipboard-history.service"
+fi
 systemctl --user daemon-reload
 systemctl --user enable clipboard-history
 systemctl --user restart clipboard-history
@@ -151,6 +172,8 @@ fi
 echo ""
 echo "Installation Complete!"
 echo "  Hotkey: $HOTKEY"
+echo "  GTK Backend: $BACKEND"
 echo "  Daemon: running in background via systemd"
 echo ""
 echo "To use a different hotkey, run: ./install.sh --hotkey \"<Primary><Shift>v\""
+echo "To force a backend, run: ./install.sh --backend wayland  # or x11"
