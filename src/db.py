@@ -144,6 +144,18 @@ class Database:
         self.conn.execute('DELETE FROM entries WHERE pinned = 0')
         self.conn.commit()
 
+    def clear_all(self):
+        """Remove ALL entries from the database, including pinned ones."""
+        rows = self.conn.execute('SELECT image_path FROM entries').fetchall()
+        for (img,) in rows:
+            if img and os.path.exists(img):
+                try:
+                    os.remove(img)
+                except OSError:
+                    pass
+        self.conn.execute('DELETE FROM entries')
+        self.conn.commit()
+
     def get_latest_hash(self) -> str | None:
         """Return the hash of the most recently added entry."""
         row = self.conn.execute(

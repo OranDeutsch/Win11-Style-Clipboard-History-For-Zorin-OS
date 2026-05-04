@@ -6,11 +6,12 @@ Press `Super+V` to open the clipboard picker, search previous entries, select wi
 
 ## Features
 
-- **Contextual Positioning**: Opens near your text cursor (caret) when possible.
+- **Contextual Positioning**: Choose between **Caret** (near text cursor), **Mouse**, **Window**, or **OS Default** placement.
 - **Wayland Support**: Includes experimental support for accurate caret positioning on Wayland/GNOME using IBus and GNOME Introspect.
 - **Rich History**: Stores text and image clipboard history in SQLite.
 - **Search & Filter**: Quickly find previous clips with an integrated search bar.
 - **Pinning**: Keep important clips at the top of the list.
+- **Delete & Clear**: Easily remove individual entries, clear unpinned history, or wipe everything from the Settings menu.
 - **Native Aesthetics**: Built with GTK4 and Adwaita to match Zorin OS 17+ styling.
 - **Safe Paste**: Uses a persistent virtual keyboard (`uinput`/`evdev`) for reliable paste injection on both X11 and Wayland.
 
@@ -37,19 +38,14 @@ The installer will:
 - **P**: Toggle pin on the selected item.
 - **Delete**: Remove the selected item.
 
-### Wayland Caret Positioning (Experimental)
+### Settings & Customization
 
-On Wayland, absolute screen coordinates are restricted. To enable accurate placement near your text cursor:
 1. Open the picker (**Super+V**).
 2. Click the **Settings** (gear) icon.
-3. Toggle **Wayland Caret Positioning (Experimental)**.
-
-This mode uses:
-- **IBus**: To capture absolute cursor coordinates from input methods.
-- **GNOME Introspect**: To locate the active window's screen position.
-- **AT-SPI**: To find the caret position within the focused application.
-
-*Note: For absolute window moving on Wayland, a companion GNOME Shell extension is recommended to grant the application move permissions.*
+3. Configure your preferences:
+   - **Positioning Mode**: Explicitly set the popup to follow your **Caret**, **Mouse**, **Active Window**, or use the **OS Default**.
+   - **Wayland Caret Positioning (Experimental)**: Enable absolute coordinate tracking on Wayland/GNOME.
+   - **Delete All History**: Completely wipe the database, including pinned items.
 
 ## Project Structure
 

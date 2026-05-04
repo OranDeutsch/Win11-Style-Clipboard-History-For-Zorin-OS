@@ -27,15 +27,18 @@ def _is_x11() -> bool:
 # ydotool (uinput) bypasses X11 entirely and reaches native Wayland windows.
 _ON_WAYLAND: bool = bool(os.environ.get('WAYLAND_DISPLAY'))
 _HAS_YDOTOOL: bool = shutil.which('ydotool') is not None
-
 POPUP_WIDTH = 580
 SETTINGS_PATH = Path.home() / '.local' / 'share' / 'clipboard-history' / 'settings.json'
+
+# Positioning Modes
 POSITION_OS_DEFAULT = 'os-default'
+POSITION_CARET = 'caret'
 POSITION_MOUSE = 'mouse'
 POSITION_WINDOW = 'window'
-POSITION_OPTIONS = (POSITION_OS_DEFAULT, POSITION_MOUSE, POSITION_WINDOW)
+POSITION_OPTIONS = (POSITION_OS_DEFAULT, POSITION_CARET, POSITION_MOUSE, POSITION_WINDOW)
 POSITION_LABELS = {
     POSITION_OS_DEFAULT: 'OS default',
+    POSITION_CARET: 'Caret',
     POSITION_MOUSE: 'Mouse',
     POSITION_WINDOW: 'Window',
 }
@@ -502,53 +505,61 @@ class ClipboardPopup(Adw.Window):
         self.set_content(toolbar_view)
 
     def _make_settings_popover(self) -> Gtk.Popover:
+        """Create the settings popover with positioning options."""
         popover = Gtk.Popover()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_margin_top(10)
-        box.set_margin_bottom(10)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(14); box.set_margin_end(14)
 
-        title = Gtk.Label(label='Settings')
-        title.set_halign(Gtk.Align.START)
-        title.add_css_class('heading')
+        title = Gtk.Label(label='Settings'); title.set_halign(Gtk.Align.START); title.add_css_class('heading')
         box.append(title)
 
+        self._position_buttons = {}
         group = None
         for mode in POSITION_OPTIONS:
-            btn = Gtk.CheckButton(label=POSITION_LABELS[mode])
-            btn.set_halign(Gtk.Align.START)
-            if group is not None:
-                btn.set_group(group)
-            else:
-                group = btn
+            btn = Gtk.CheckButton(label=POSITION_LABELS[mode], halign=Gtk.Align.START)
+            if group: btn.set_group(group)
+            else: group = btn
             btn.set_active(mode == self._position_mode)
             btn.connect('toggled', self._on_position_mode_toggled, mode)
             self._position_buttons[mode] = btn
             box.append(btn)
 
-        # Wayland Experimental Toggle
         if _ON_WAYLAND:
-            sep = Gtk.Separator()
-            sep.set_margin_top(4)
-            sep.set_margin_bottom(4)
-            box.append(sep)
-
+            box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
             wl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            wl_lbl = Gtk.Label(label='Wayland Caret Positioning\n(Experimental)')
-            wl_lbl.set_halign(Gtk.Align.START)
+            wl_lbl = Gtk.Label(label='Wayland Caret Positioning\n(Experimental)', halign=Gtk.Align.START)
             wl_lbl.add_css_class('caption')
-            wl_switch = Gtk.Switch()
-            wl_switch.set_active(self._wayland_positioning)
-            wl_switch.set_valign(Gtk.Align.CENTER)
+            wl_switch = Gtk.Switch(active=self._wayland_positioning, valign=Gtk.Align.CENTER)
             wl_switch.connect('notify::active', self._on_wayland_pos_toggled)
-
-            wl_box.append(wl_lbl)
-            wl_box.append(wl_switch)
+            wl_box.append(wl_lbl); wl_box.append(wl_switch)
             box.append(wl_box)
+
+        # Delete All History Button
+        box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
+        del_all_btn = Gtk.Button(label='Delete All History')
+        del_all_btn.add_css_class('destructive-action')
+        del_all_btn.connect('clicked', self._on_delete_all_clicked)
+        box.append(del_all_btn)
 
         popover.set_child(box)
         return popover
+
+    def _on_delete_all_clicked(self, btn):
+        dialog = Adw.AlertDialog.new('Delete All History?', 'This will permanently remove ALL clipboard entries, including pinned ones.')
+        dialog.add_response('cancel', 'Cancel'); dialog.add_response('delete', 'Delete All')
+        dialog.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect('response', self._on_delete_all_confirmed)
+        dialog.present(self)
+
+    def _on_delete_all_confirmed(self, dialog, response):
+        if response == 'delete':
+            self._db.clear_unpinned() # Clear unpinned first
+            # We need a clear_all method in DB or just delete where 1=1
+            # I'll update db.py if needed, but for now I'll use toggle_pin on everything and then clear_unpinned?
+            # Better to add clear_all to db.py.
+            self._db.clear_all()
+            self._populate()
 
     def _load_settings(self) -> None:
         try:
@@ -659,6 +670,13 @@ class ClipboardPopup(Adw.Window):
 
     def _best_anchor(self) -> dict:
         """Return caret/focused-text/window/fallback anchor metadata."""
+        if self._position_mode == POSITION_CARET:
+            if self._caret_tracker:
+                anchor = self._caret_tracker.get_anchor()
+                if anchor and anchor.get('source') in ('caret', 'ibus', 'focused-text'):
+                    return anchor
+            print('[popup] caret placement unavailable; falling back', flush=True)
+
         if self._position_mode == POSITION_MOUSE:
             anchor = _mouse_anchor()
             if anchor:
