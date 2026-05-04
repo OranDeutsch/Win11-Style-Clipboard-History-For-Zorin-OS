@@ -1,6 +1,6 @@
 [Unit]
 Description=Clipboard History Daemon
-Documentation=https://github.com/anthropics/claude-code
+Documentation=https://github.com/OranDeutsch/Win11-Style-Clipboard-History-For-Zorin-OS
 After=graphical-session.target
 PartOf=graphical-session.target
 
@@ -10,6 +10,17 @@ ExecStart=%h/.local/bin/clipboard-history
 Restart=on-failure
 RestartSec=3
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=077
 
 [Install]
 WantedBy=graphical-session.target

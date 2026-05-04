@@ -4,6 +4,18 @@ A Python/GTK4 clipboard-history picker for Zorin OS (GNOME). It aims to feel clo
 
 Press `Super+V` to open the clipboard picker, search previous entries, select with the arrow keys, and paste with `Enter` or a click.
 
+## Preview
+
+![Clipboard History picker showing text and image entries](Media/Screenshot%20from%202026-05-04%2001-31-32.png)
+
+![Clipboard History settings and positioning options](Media/Screenshot%20from%202026-05-04%2001-39-58.png)
+
+![Clipboard History shortcut capture dialog](Media/Screenshot%20from%202026-05-04%2001-40-11.png)
+
+<video src="Media/Screencast%20from%202026-05-04%2001-44-11.webm" controls width="720">
+  Demo video: Media/Screencast from 2026-05-04 01-44-11.webm
+</video>
+
 ## TL;DR Warning
 
 This is a desktop integration tool, not a sandboxed app. The installer adds a user systemd service, writes GNOME keyboard-shortcut settings with `gsettings`, installs files under `~/.local`, and may configure `/dev/uinput` access so the app can paste into other windows. Read `install.sh` first if you are unsure, and do not install it on a system where you are not comfortable with those changes.
@@ -25,6 +37,19 @@ Run:
 
 ```bash
 ./install.sh
+```
+
+To inspect what the installer will do before it changes anything:
+
+```bash
+./install.sh --print-actions
+./install.sh --dry-run
+```
+
+To avoid privileged package/udev changes and install only user-level files and settings:
+
+```bash
+./install.sh --user-only
 ```
 
 By default the installer uses `--backend auto`, which lets GTK choose the best backend for the current session. You can force one:
@@ -49,6 +74,8 @@ The installer will:
 - Set up udev rules for `/dev/uinput` access.
 - Install the `clipboard-history` daemon as a systemd user service.
 - Bind your chosen hotkey to open the picker.
+
+If dependencies or `/dev/uinput` access require `sudo`, the installer prints the privileged actions and asks for confirmation first. Use `--yes` only after reviewing `--print-actions`.
 
 You can also change the hotkey live from the app:
 
@@ -97,3 +124,18 @@ Run:
 ```bash
 ./uninstall.sh
 ```
+
+## Security & Permissions
+
+Clipboard History needs desktop integration that ordinary sandboxed apps usually cannot access. It monitors clipboard changes, registers a GNOME global shortcut, and uses a virtual keyboard device for reliable paste injection.
+
+The safer install modes are:
+
+- `./install.sh --print-actions`: show the full install plan and exit.
+- `./install.sh --dry-run`: print commands instead of running them.
+- `./install.sh --user-only`: skip `sudo`, apt dependency installation, and udev setup.
+- `./install.sh --yes`: allow privileged changes non-interactively after you have reviewed the plan.
+
+The app stores data under `~/.local/share/clipboard-history`, installs launchers under `~/.local/bin`, installs app files under `~/.local/lib/clipboard-history`, and registers a user service under `~/.config/systemd/user`.
+
+The systemd user service also enables conservative hardening such as `NoNewPrivileges`, private temp storage, read-only system paths, and kernel/control-group protections. It does not use a strict device sandbox because reliable paste injection needs access to `/dev/uinput`.
