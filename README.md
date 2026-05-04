@@ -23,11 +23,19 @@ Run:
 ./install.sh
 ```
 
+### Custom Hotkey
+
+By default, the picker is bound to `Super+V`. To use a different hotkey, pass the `--hotkey` argument:
+
+```bash
+./install.sh --hotkey "<Primary><Shift>v"
+```
+
 The installer will:
 - Install required dependencies (`python3-gi`, `python3-evdev`, `ydotool`, etc.).
 - Set up udev rules for `/dev/uinput` access.
 - Install the `clipboard-history` daemon as a systemd user service.
-- Bind `Super+V` to open the picker.
+- Bind your chosen hotkey to open the picker.
 
 ## Usage
 

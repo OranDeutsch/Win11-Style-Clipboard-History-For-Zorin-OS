@@ -116,6 +116,7 @@ class Database:
                 'UPDATE entries SET pinned = ? WHERE id = ?', (new, id_)
             )
             self.conn.commit()
+            print(f'[db] toggle_pin id={id_} -> {new}', flush=True)
 
     def delete_entry(self, id_: int):
         """Delete a specific entry and its associated image file."""
@@ -127,8 +128,9 @@ class Database:
                 os.remove(row[0])
             except OSError:
                 pass
-        self.conn.execute('DELETE FROM entries WHERE id = ?', (id_,))
+        cursor = self.conn.execute('DELETE FROM entries WHERE id = ?', (id_,))
         self.conn.commit()
+        print(f'[db] delete_entry id={id_} affected={cursor.rowcount}', flush=True)
 
     def clear_unpinned(self):
         """Remove all unpinned entries from the database."""
@@ -141,8 +143,9 @@ class Database:
                     os.remove(img)
                 except OSError:
                     pass
-        self.conn.execute('DELETE FROM entries WHERE pinned = 0')
+        cursor = self.conn.execute('DELETE FROM entries WHERE pinned = 0')
         self.conn.commit()
+        print(f'[db] clear_unpinned affected={cursor.rowcount}', flush=True)
 
     def clear_all(self):
         """Remove ALL entries from the database, including pinned ones."""
@@ -153,8 +156,9 @@ class Database:
                     os.remove(img)
                 except OSError:
                     pass
-        self.conn.execute('DELETE FROM entries')
+        cursor = self.conn.execute('DELETE FROM entries')
         self.conn.commit()
+        print(f'[db] clear_all affected={cursor.rowcount}', flush=True)
 
     def get_latest_hash(self) -> str | None:
         """Return the hash of the most recently added entry."""

@@ -1,3 +1,10 @@
+"""
+Main UI and Popup Logic for Clipboard History.
+
+This module handles the GTK4/libadwaita interface, window positioning strategies
+(including X11 pre-map hacks and experimental Wayland support), and the final
+paste injection via virtual keyboard.
+"""
 import subprocess
 import hashlib
 import json
@@ -16,17 +23,17 @@ from gi.repository import Gtk, Gdk, Adw, GLib, GdkX11, Pango
 
 
 def _is_x11() -> bool:
+    """Check if the current GDK display is X11."""
     try:
         return isinstance(Gdk.Display.get_default(), GdkX11.X11Display)
     except Exception:
         return False
 
 
-# True when running inside a Wayland session (even if GDK_BACKEND=x11 forces XWayland).
-# On Wayland, xdotool XTEST events land on Mutter's focus proxy and go nowhere;
-# ydotool (uinput) bypasses X11 entirely and reaches native Wayland windows.
+# Detect Wayland environment (even if running via XWayland)
 _ON_WAYLAND: bool = bool(os.environ.get('WAYLAND_DISPLAY'))
 _HAS_YDOTOOL: bool = shutil.which('ydotool') is not None
+
 POPUP_WIDTH = 580
 SETTINGS_PATH = Path.home() / '.local' / 'share' / 'clipboard-history' / 'settings.json'
 
@@ -44,7 +51,10 @@ POSITION_LABELS = {
 }
 
 
+# --- X11 Positioning Hacks ---
+
 class _XSizeHints(ctypes.Structure):
+    """Ctype structure for X11 WM_NORMAL_HINTS."""
     _fields_ = [
         ('flags', ctypes.c_long),
         ('x', ctypes.c_int), ('y', ctypes.c_int),
@@ -60,11 +70,11 @@ class _XSizeHints(ctypes.Structure):
 
 
 def _pre_map_window(xid: int, x: int, y: int) -> None:
-    """Before mapping: move window, set USPosition hint, and set compositor opacity=0.
+    """Prepare X11 window before mapping to ensure correct placement and opacity.
 
-    XSync is called before XCloseDisplay to guarantee the X server has processed
-    all three requests before GTK's XMapWindow arrives. XCloseDisplay alone only
-    flushes (sends) but does not wait, leaving a race between two X connections.
+    This bypasses GTK's default placement to force the window at (x, y) 
+    using USPosition hints and sets initial opacity to 0 to prevent flicker 
+    during move adjustments.
     """
     try:
         lib = ctypes.CDLL('libX11.so.6')
@@ -72,10 +82,10 @@ def _pre_map_window(xid: int, x: int, y: int) -> None:
         if not dpy:
             return
 
-        # Move the window at the X level before it is mapped; works on unmapped windows.
+        # Force move at the X level
         lib.XMoveWindow(dpy, xid, x, y)
 
-        # WM_NORMAL_HINTS with USPosition — tells Mutter/XFWM where to place the window.
+        # Set WM_NORMAL_HINTS with USPosition — tells Mutter/XFWM where to place the window.
         hints = _XSizeHints()
         hints.flags = 1  # USPosition
         hints.x = x
@@ -89,17 +99,15 @@ def _pre_map_window(xid: int, x: int, y: int) -> None:
         lib.XChangeProperty(dpy, xid, opacity_atom, XA_CARDINAL, 32, 0,
                             ctypes.byref(val), 1)
 
-        # XSync waits for the server to process all pending requests — the next map
-        # request from GDK will therefore see the position and opacity already set.
+        # XSync waits for the server to process all pending requests.
         lib.XSync(dpy, False)
         lib.XCloseDisplay(dpy)
     except Exception as e:
         print(f'[popup] pre_map_window failed: {e}', flush=True)
 
 
-
-
 def _monitor_for(x: int, y: int) -> Gdk.Rectangle:
+    """Find the monitor geometry that contains the given coordinates."""
     display = Gdk.Display.get_default()
     monitors = display.get_monitors()
     for i in range(monitors.get_n_items()):
@@ -111,7 +119,7 @@ def _monitor_for(x: int, y: int) -> Gdk.Rectangle:
 
 
 def _restore_window_opacity(xid: int) -> None:
-    """Delete _NET_WM_WINDOW_OPACITY so compositor reverts to fully opaque."""
+    """Restore X11 window opacity to fully opaque."""
     try:
         lib = ctypes.CDLL('libX11.so.6')
         dpy = lib.XOpenDisplay(None)
@@ -125,7 +133,7 @@ def _restore_window_opacity(xid: int) -> None:
 
 
 def _wl_copy_text(text: str) -> None:
-    """Hand the text to wl-copy so it survives after our window hides."""
+    """Copy text to clipboard using wl-copy (Wayland native persistence)."""
     try:
         proc = subprocess.Popen(
             ['wl-copy'],
@@ -153,7 +161,7 @@ def _wl_copy_text(text: str) -> None:
 
 
 def _wl_copy_image(path: str) -> None:
-    """Hand image bytes to wl-copy."""
+    """Copy image to clipboard using wl-copy."""
     try:
         with open(path, 'rb') as f:
             subprocess.Popen(
@@ -169,10 +177,12 @@ def _wl_copy_image(path: str) -> None:
 
 
 def _clamp(value: int, low: int, high: int) -> int:
+    """Clamp a value between low and high."""
     return max(low, min(value, high))
 
 
 def _fallback_anchor() -> dict:
+    """Default anchor at the top-center of the primary monitor."""
     display = Gdk.Display.get_default()
     monitors = display.get_monitors()
     geo = monitors.get_item(0).get_geometry()
@@ -190,6 +200,7 @@ def _fallback_anchor() -> dict:
 
 def _make_anchor(source: str, confidence: str, rect: tuple[int, int, int, int],
                  app: str = '', age_ms: int = 0) -> dict:
+    """Helper to construct an anchor dictionary."""
     x, y, w, h = rect
     return {
         'source': source,
@@ -204,6 +215,7 @@ def _make_anchor(source: str, confidence: str, rect: tuple[int, int, int, int],
 
 
 def _mouse_anchor() -> dict | None:
+    """Get anchor at current mouse position via xdotool."""
     try:
         result = subprocess.run(
             ['xdotool', 'getmouselocation', '--shell'],
@@ -233,6 +245,7 @@ def _mouse_anchor() -> dict | None:
 
 
 def _anchor_rect(anchor: dict) -> tuple[int, int, int, int]:
+    """Extract rectangle tuple from anchor dict."""
     return (
         int(anchor.get('x', 0)),
         int(anchor.get('y', 0)),
@@ -242,13 +255,14 @@ def _anchor_rect(anchor: dict) -> tuple[int, int, int, int]:
 
 
 def _popup_height_for_anchor(anchor: dict, ideal_h: int) -> int:
+    """Calculate available height for the popup based on its monitor position."""
     x, y, w, h = _anchor_rect(anchor)
     source = anchor.get('source', 'fallback')
     geo = _monitor_for(x + w // 2, y + h // 2)
     margin = 10
     gap = 12
 
-    if source in ('caret', 'focused-text'):
+    if source in ('caret', 'focused-text', 'ibus'):
         space_below = max(0, (geo.y + geo.height - margin) - (y + h + gap))
         space_above = max(0, (y - gap) - (geo.y + margin))
         available = max(space_below, space_above)
@@ -259,7 +273,7 @@ def _popup_height_for_anchor(anchor: dict, ideal_h: int) -> int:
 
 
 def _position_for_anchor(anchor: dict, popup_h: int) -> tuple[int, int]:
-    """Place the popup according to anchor confidence, clamped to the monitor."""
+    """Determine (px, py) coordinates for the popup relative to an anchor."""
     x, y, w, h = _anchor_rect(anchor)
     source = anchor.get('source', 'fallback')
     geo = _monitor_for(x + w // 2, y + h // 2)
@@ -274,8 +288,7 @@ def _position_for_anchor(anchor: dict, popup_h: int) -> tuple[int, int]:
         return _clamp(px, geo.x + margin, max_x), _clamp(py, geo.y + margin, max_y)
 
     if source == 'window':
-        # Low-confidence anchors should feel attached to the active app without
-        # pretending we know the text insertion point.
+        # Low-confidence anchors should feel attached to the active app
         px = x + (w - POPUP_WIDTH) // 2
         py = y + max(36, min(180, h // 5))
         return _clamp(px, geo.x + margin, max_x), _clamp(py, geo.y + margin, max_y)
@@ -294,6 +307,7 @@ def _position_for_anchor(anchor: dict, popup_h: int) -> tuple[int, int]:
 
 
 def _get_active_window_class() -> str:
+    """Get the WM_CLASS of the currently focused window."""
     # Try xdotool active window first.
     try:
         result = subprocess.run(
@@ -305,8 +319,8 @@ def _get_active_window_class() -> str:
         cls = result.stdout.strip().lower()
         if cls:
             return cls
-    except Exception as e:
-        print(f'[popup] xdotool getactivewindow failed: {e}', flush=True)
+    except Exception:
+        pass
 
     # Try xdotool focused window.
     try:
@@ -319,44 +333,14 @@ def _get_active_window_class() -> str:
         cls = result.stdout.strip().lower()
         if cls:
             return cls
-    except Exception as e:
-        print(f'[popup] xdotool getwindowfocus failed: {e}', flush=True)
-
-    # Fallback through xprop _NET_ACTIVE_WINDOW.
-    try:
-        root = subprocess.run(
-            ['xprop', '-root', '_NET_ACTIVE_WINDOW'],
-            capture_output=True,
-            text=True,
-            timeout=0.5
-        ).stdout
-
-        # Example:
-        # _NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00007
-        if 'window id #' in root:
-            win_id = root.split('window id #', 1)[1].strip().split()[0]
-
-            wm = subprocess.run(
-                ['xprop', '-id', win_id, 'WM_CLASS'],
-                capture_output=True,
-                text=True,
-                timeout=0.5
-            ).stdout
-
-            # Example:
-            # WM_CLASS(STRING) = "gnome-terminal-server", "Gnome-terminal"
-            if '=' in wm:
-                parts = wm.split('=', 1)[1].replace('"', '').split(',')
-                parts = [p.strip().lower() for p in parts if p.strip()]
-                if parts:
-                    return parts[-1]
-    except Exception as e:
-        print(f'[popup] xprop fallback failed: {e}', flush=True)
+    except Exception:
+        pass
 
     return ''
 
 
 def _is_terminal(wm_class: str) -> bool:
+    """Check if the given window class represents a terminal emulator."""
     wm_class = (wm_class or '').lower()
 
     terminal_classes = {
@@ -387,6 +371,7 @@ def _is_terminal(wm_class: str) -> bool:
 
 
 def _is_vscode_terminal_context(wm_class: str, focus_hints: dict | None) -> bool:
+    """Heuristic to detect if focus is inside VS Code's integrated terminal."""
     if (wm_class or '').lower() not in {'code', 'code-oss'}:
         return False
     if not focus_hints:
@@ -399,10 +384,13 @@ def _is_vscode_terminal_context(wm_class: str, focus_hints: dict | None) -> bool
 
 
 def _paste_key_for(wm_class: str) -> str:
+    """Determine the paste shortcut (Ctrl+V vs Ctrl+Shift+V)."""
     return 'ctrl+shift+v' if _is_terminal(wm_class) else 'ctrl+v'
 
 
 class ClipboardPopup(Adw.Window):
+    """The main clipboard history picker window."""
+
     def __init__(self, app, db, monitor, caret_tracker=None):
         super().__init__()
         self.set_application(app)
@@ -414,7 +402,7 @@ class ClipboardPopup(Adw.Window):
         self._caret_tracker = caret_tracker
         self._active_wm_class = ''
         self._focus_hints: dict[str, str] = {}
-        self._x11_configured = False  # skip-taskbar hint only needed once
+        self._x11_configured = False
         self._position_mode = POSITION_OS_DEFAULT
         self._wayland_positioning = False
         self._load_settings()
@@ -554,10 +542,6 @@ class ClipboardPopup(Adw.Window):
 
     def _on_delete_all_confirmed(self, dialog, response):
         if response == 'delete':
-            self._db.clear_unpinned() # Clear unpinned first
-            # We need a clear_all method in DB or just delete where 1=1
-            # I'll update db.py if needed, but for now I'll use toggle_pin on everything and then clear_unpinned?
-            # Better to add clear_all to db.py.
             self._db.clear_all()
             self._populate()
 
@@ -608,11 +592,6 @@ class ClipboardPopup(Adw.Window):
         import os as _os
         disp = Gdk.Display.get_default()
         surface = self.get_surface()
-        print(f'[popup] GDK backend: {type(disp).__name__}', flush=True)
-        print(f'[popup] surface type: {type(surface).__name__}', flush=True)
-        print(f'[popup] DISPLAY={_os.environ.get("DISPLAY")!r}  '
-              f'WAYLAND_DISPLAY={_os.environ.get("WAYLAND_DISPLAY")!r}  '
-              f'GDK_BACKEND={_os.environ.get("GDK_BACKEND")!r}', flush=True)
 
         self._active_wm_class = _get_active_window_class()
         if not self._active_wm_class and self._caret_tracker:
@@ -623,9 +602,6 @@ class ClipboardPopup(Adw.Window):
                 self._focus_hints = self._caret_tracker.get_focus_hints()
             except Exception as e:
                 print(f'[popup] focus hints failed: {e}', flush=True)
-        print(f'[popup] active wm_class={self._active_wm_class!r}', flush=True)
-        if self._focus_hints:
-            print(f'[popup] focus hints={self._focus_hints!r}', flush=True)
 
         n = len(self._db.get_entries(limit=100))
         ideal_h = min(750, max(200, n * 80 + 80))
@@ -643,26 +619,12 @@ class ClipboardPopup(Adw.Window):
         self.set_default_size(POPUP_WIDTH, popup_h)
         px, py = _position_for_anchor(anchor, popup_h)
         self._target_x, self._target_y = px, py
-        print(
-            '[popup] anchor: '
-            f"source={anchor.get('source')!r} "
-            f"confidence={anchor.get('confidence')!r} "
-            f"rect=({anchor.get('x')},{anchor.get('y')} "
-            f"{anchor.get('width')}x{anchor.get('height')}) "
-            f"age_ms={anchor.get('age_ms')}",
-            flush=True,
-        )
-        print(f'[popup] target position: ({px}, {py})  popup_h={popup_h}', flush=True)
 
         if isinstance(surface, GdkX11.X11Surface):
             xid = surface.get_xid()
-            print(f'[popup] X11 surface xid=0x{xid:x} — calling pre_map_window', flush=True)
             _pre_map_window(xid, px, py)
         elif self._wayland_positioning:
-            print('[popup] Wayland surface with experimental positioning', flush=True)
             self._wl_move(px, py)
-        else:
-            print('[popup] Wayland surface — skipping X11 positioning', flush=True)
 
         self._populate()
         self.present()
@@ -705,7 +667,6 @@ class ClipboardPopup(Adw.Window):
                     return anchor
             except Exception as e:
                 print(f'[popup] caret anchor failed: {e}', flush=True)
-        print('[popup] fallback: primary monitor command palette', flush=True)
         return _fallback_anchor()
 
     def _on_position_mode_toggled(self, btn, mode: str):
@@ -724,7 +685,7 @@ class ClipboardPopup(Adw.Window):
         self._xmove(self._target_x, self._target_y)
         GLib.timeout_add(60, self._retry_xmove)
         GLib.timeout_add(160, self._retry_xmove)
-        GLib.timeout_add(240, self._reveal)  # give compositor time to apply the move
+        GLib.timeout_add(240, self._reveal)
         return False
 
     def _retry_xmove(self) -> bool:
@@ -745,38 +706,21 @@ class ClipboardPopup(Adw.Window):
         """Move the X11 window to (px, py). No-op on Wayland."""
         surface = self.get_surface()
         if not isinstance(surface, GdkX11.X11Surface):
-            # Try Wayland move if enabled
             if self._wayland_positioning:
                 self._wl_move(px, py)
             return
 
         xid = surface.get_xid()
-        r = subprocess.run(
-            ['xdotool', 'windowmove', str(xid), str(px), str(py)],
-            capture_output=True, text=True, timeout=0.5
-        )
-        print(f'[popup] xdotool windowmove 0x{xid:x} ({px},{py}): '
-              f'rc={r.returncode} {r.stderr.strip()!r}', flush=True)
+        subprocess.run(['xdotool', 'windowmove', str(xid), str(px), str(py)], capture_output=True)
 
-        # Apply X11 hints once.
         if not self._x11_configured:
             surface.set_skip_taskbar_hint(True)
             surface.set_skip_pager_hint(True)
             self._x11_configured = True
 
     def _wl_move(self, px: int, py: int):
-        """Attempt to move the window on Wayland via GNOME Shell extension DBus."""
-        if not _ON_WAYLAND:
-            return
-        try:
-            # This requires a companion GNOME Shell extension to be installed
-            # that provides org.gnome.Shell.MoveWindow.
-            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-            # Placeholder for future extension call
-            # bus.call_sync(...)
-            pass
-        except Exception:
-            pass
+        """Placeholder for Wayland window movement (requires companion extension)."""
+        pass
 
     # ── List population ──────────────────────────────────────────────────────
 
@@ -807,15 +751,11 @@ class ClipboardPopup(Adw.Window):
         row._search_text = (content or '').lower()
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        box.set_margin_start(4)
-        box.set_margin_end(2)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
+        box.set_margin_start(4); box.set_margin_end(2)
+        box.set_margin_top(4); box.set_margin_bottom(4)
 
-        # Content area
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        content_box.set_hexpand(True)
-        content_box.set_valign(Gtk.Align.CENTER)
+        content_box.set_hexpand(True); content_box.set_valign(Gtk.Align.CENTER)
 
         if type_ == 'image' and image_path and os.path.exists(image_path):
             pic = Gtk.Picture.new_for_filename(image_path)
@@ -825,45 +765,26 @@ class ClipboardPopup(Adw.Window):
             content_box.append(pic)
         else:
             preview = (content or '[empty]')[:150].replace('\n', ' ').replace('\t', ' ')
-            lbl = Gtk.Label(label=preview)
-            lbl.set_halign(Gtk.Align.START)
-            lbl.set_xalign(0)
-            lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            lbl.set_max_width_chars(45)
+            lbl = Gtk.Label(label=preview, halign=Gtk.Align.START, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=45)
             lbl.add_css_class('ch-preview')
-            if pinned:
-                lbl.add_css_class('ch-pinned-text')
+            if pinned: lbl.add_css_class('ch-pinned-text')
             content_box.append(lbl)
 
-        # Timestamp
         ts = datetime.fromtimestamp(created_at).strftime('%H:%M')
-        ts_lbl = Gtk.Label(label=ts)
-        ts_lbl.set_halign(Gtk.Align.START)
-        ts_lbl.add_css_class('caption')
-        ts_lbl.add_css_class('dim-label')
+        ts_lbl = Gtk.Label(label=ts, halign=Gtk.Align.START); ts_lbl.add_css_class('caption'); ts_lbl.add_css_class('dim-label')
         content_box.append(ts_lbl)
-
         box.append(content_box)
 
         # Pin button
-        pin_btn = Gtk.Button()
-        pin_btn.set_icon_name('view-pin-symbolic')
-        pin_btn.add_css_class('flat')
-        pin_btn.add_css_class('circular')
-        if pinned:
-            pin_btn.add_css_class('accent')
-        pin_btn.set_tooltip_text('Unpin' if pinned else 'Pin')
-        pin_btn.set_valign(Gtk.Align.CENTER)
+        pin_btn = Gtk.Button(icon_name='view-pin-symbolic', tooltip_text='Unpin' if pinned else 'Pin', valign=Gtk.Align.CENTER)
+        pin_btn.add_css_class('flat'); pin_btn.add_css_class('circular')
+        if pinned: pin_btn.add_css_class('accent')
         pin_btn.connect('clicked', self._on_pin_clicked, row)
         box.append(pin_btn)
 
         # Delete button
-        del_btn = Gtk.Button()
-        del_btn.set_icon_name('edit-delete-symbolic')
-        del_btn.add_css_class('flat')
-        del_btn.add_css_class('circular')
-        del_btn.set_tooltip_text('Delete')
-        del_btn.set_valign(Gtk.Align.CENTER)
+        del_btn = Gtk.Button(icon_name='edit-delete-symbolic', tooltip_text='Delete', valign=Gtk.Align.CENTER)
+        del_btn.add_css_class('flat'); del_btn.add_css_class('circular')
         del_btn.connect('clicked', self._on_delete_clicked, row)
         box.append(del_btn)
 
@@ -874,24 +795,17 @@ class ClipboardPopup(Adw.Window):
 
     def _filter_row(self, row) -> bool:
         query = self._search_entry.get_text().lower().strip()
-        if not query:
-            return True
-        return query in getattr(row, '_search_text', '')
+        return not query or query in getattr(row, '_search_text', '')
 
     def _on_search_changed(self, entry):
         self._list_box.invalidate_filter()
-
-        # Select first visible row
         row = self._list_box.get_row_at_index(0)
-        while row and not row.get_visible():
-            row = row.get_next_sibling()
-        if row:
-            self._list_box.select_row(row)
+        while row and not row.get_visible(): row = row.get_next_sibling()
+        if row: self._list_box.select_row(row)
 
     def _on_search_activate(self, entry):
         row = self._list_box.get_selected_row()
-        if row:
-            self._paste_row(row)
+        if row: self._paste_row(row)
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -899,121 +813,44 @@ class ClipboardPopup(Adw.Window):
         self._paste_row(row)
 
     def _paste_row(self, row):
-        type_ = row._content_type
-        content = row._content
-        image_path = row._image_path
+        type_, content, image_path = row._content_type, row._content, row._image_path
         wm_class = self._active_wm_class
-        is_terminal = (
-            type_ == 'text'
-            and content
-            and (
-                _is_terminal(wm_class)
-                or _is_vscode_terminal_context(wm_class, self._focus_hints)
-            )
-        )
-        paste_delay_ms = 700 if is_terminal else 400
-
+        is_terminal = (type_ == 'text' and content and (_is_terminal(wm_class) or _is_vscode_terminal_context(wm_class, self._focus_hints)))
+        
         clipboard = Gdk.Display.get_default().get_clipboard()
-
-        # Set clipboard BEFORE hiding the window so GDK still owns the X11
-        # selection when it is claimed. wl-copy runs as a daemon and keeps
-        # the content alive on the Wayland side after our window disappears.
         if type_ == 'text' and content:
-            paste_text = content.rstrip('\n') if is_terminal else content
-            h = hashlib.sha256(paste_text.encode()).hexdigest()
-            self._monitor.set_skip_hash(h)
-            clipboard.set(paste_text)
-            _wl_copy_text(paste_text)
+            txt = content.rstrip('\n') if is_terminal else content
+            self._monitor.set_skip_hash(hashlib.sha256(txt.encode()).hexdigest())
+            clipboard.set(txt); _wl_copy_text(txt)
         elif type_ == 'image' and image_path and os.path.exists(image_path):
-            try:
-                texture = Gdk.Texture.new_from_filename(image_path)
-                self._monitor.set_skip_hash('image')
-                clipboard.set(texture)
-                _wl_copy_image(image_path)
-            except Exception as e:
-                print(f'[popup] set image failed: {e}', flush=True)
-                return
+            self._monitor.set_skip_hash('image')
+            clipboard.set(Gdk.Texture.new_from_filename(image_path)); _wl_copy_image(image_path)
 
         self.set_visible(False)
-
-        # Terminals use Ctrl+Shift+V and get a slightly longer delay because focus
-        # can briefly bounce while the popup hides under GNOME/Mutter.
-        if is_terminal:
-            key = 'ctrl+shift+v'
-            print(f'[popup] terminal paste into {wm_class!r} using {key}', flush=True)
-        else:
-            key = _paste_key_for(wm_class)
-            print(f'[popup] normal paste into {wm_class!r} using {key}', flush=True)
-        GLib.timeout_add(paste_delay_ms, self._do_paste, key)
+        key = 'ctrl+shift+v' if is_terminal else _paste_key_for(wm_class)
+        GLib.timeout_add(700 if is_terminal else 400, self._do_paste, key)
 
     def _do_paste(self, key: str) -> bool:
+        import uinput_kbd
         if _ON_WAYLAND:
-            # Try persistent virtual keyboard (evdev/uinput) first — it works for
-            # both Wayland-native and XWayland windows and has no device-timing race.
-            import uinput_kbd
-            if uinput_kbd.inject_key(key):
-                return False
-            # Fall back to ydotool (standalone uinput — may have timing issues)
-            if _HAS_YDOTOOL:
-                self._do_paste_ydotool(key)
-                return False
-        # X11 session (or Wayland fallback exhausted): XTEST via xdotool
-        self._do_paste_xdotool(key)
+            if uinput_kbd.inject_key(key): return False
+            if _HAS_YDOTOOL: subprocess.run(['ydotool', 'key', '--delay', '0', key]); return False
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', key])
         return False
-
-    def _do_paste_ydotool(self, key: str) -> None:
-        """Inject key via ydotool (uinput) — fallback when evdev is unavailable."""
-        r = subprocess.run(
-            ['ydotool', 'key', '--delay', '0', key],
-            capture_output=True, text=True, timeout=3.0
-        )
-        if r.returncode != 0:
-            print(f'[popup] ydotool key {key!r} FAILED rc={r.returncode} '
-                  f'stderr={r.stderr.strip()!r} — falling back to xdotool', flush=True)
-            self._do_paste_xdotool(key)
-        else:
-            print(f'[popup] ydotool key {key!r}: OK', flush=True)
-
-    def _do_paste_xdotool(self, key: str) -> None:
-        """Inject key via xdotool XTEST — works for X11 / XWayland windows."""
-        r = subprocess.run(
-            ['xdotool', 'key', '--clearmodifiers', key],
-            capture_output=True, text=True, timeout=2.0
-        )
-        if r.returncode != 0:
-            print(f'[popup] xdotool key {key!r} FAILED rc={r.returncode} '
-                  f'stderr={r.stderr.strip()!r}', flush=True)
-        else:
-            print(f'[popup] xdotool key {key!r}: OK', flush=True)
 
     def _on_pin_clicked(self, btn, row):
         self._db.toggle_pin(row._entry_id)
-        row._pinned = not row._pinned
-        if row._pinned:
-            btn.add_css_class('accent')
-            btn.set_tooltip_text('Unpin')
-        else:
-            btn.remove_css_class('accent')
-            btn.set_tooltip_text('Pin')
-
-        # Re-sort list
         self._populate()
 
     def _on_delete_clicked(self, btn, row):
         self._db.delete_entry(row._entry_id)
-        self._list_box.remove(row)
-        entries = self._db.get_entries()
-        self._empty_label.set_visible(len(entries) == 0)
+        # Using _populate instead of remove to ensure UI and DB are strictly in sync
+        self._populate()
 
     def _on_clear(self, btn):
-        dialog = Adw.AlertDialog.new(
-            'Clear History?',
-            'All unpinned clipboard entries will be deleted. Pinned items are kept.'
-        )
-        dialog.add_response('cancel', 'Cancel')
-        dialog.add_response('clear', 'Clear')
+        dialog = Adw.AlertDialog.new('Clear History?', 'All unpinned clipboard entries will be deleted.')
+        dialog.add_response('cancel', 'Cancel'); dialog.add_response('clear', 'Clear')
         dialog.set_response_appearance('clear', Adw.ResponseAppearance.DESTRUCTIVE)
-        dialog.set_default_response('cancel')
         dialog.connect('response', self._on_clear_confirmed)
         dialog.present(self)
 
@@ -1025,75 +862,41 @@ class ClipboardPopup(Adw.Window):
     # ── Focus / Keyboard ─────────────────────────────────────────────────────
 
     def _on_active_changed(self, window, pspec):
-        if not self.is_active():
-            GLib.timeout_add(100, self._check_still_inactive)
+        if not self.is_active(): GLib.timeout_add(100, self._check_still_inactive)
 
     def _check_still_inactive(self) -> bool:
-        # Confirm still inactive before hiding.
-        if not self.is_active():
-            self.set_visible(False)
+        if not self.is_active(): self.set_visible(False)
         return False
 
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
-        # Let search entry handle normal typing
-        if self._search_entry.has_focus() and keyval not in (
-            Gdk.KEY_Escape,
-            Gdk.KEY_Return,
-            Gdk.KEY_KP_Enter,
-            Gdk.KEY_Up,
-            Gdk.KEY_Down,
-            Gdk.KEY_Delete
-        ):
+        if self._search_entry.has_focus() and keyval not in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Delete):
             return False
-
-        if keyval == Gdk.KEY_Escape:
-            self.set_visible(False)
-            return True
-
+        if keyval == Gdk.KEY_Escape: self.set_visible(False); return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             row = self._list_box.get_selected_row()
-            if row:
-                self._paste_row(row)
+            if row: self._paste_row(row)
             return True
-
         if keyval == Gdk.KEY_Delete:
             row = self._list_box.get_selected_row()
-            if row:
-                self._on_delete_clicked(None, row)
+            if row: self._on_delete_clicked(None, row)
             return True
-
         if keyval in (Gdk.KEY_p, Gdk.KEY_P):
             row = self._list_box.get_selected_row()
-            if row:
-                self._on_pin_clicked(None, row)
+            if row: self._on_pin_clicked(None, row)
             return True
-
-        if keyval == Gdk.KEY_Down:
-            self._move_selection(1)
-            return True
-
-        if keyval == Gdk.KEY_Up:
-            self._move_selection(-1)
-            return True
-
+        if keyval == Gdk.KEY_Down: self._move_selection(1); return True
+        if keyval == Gdk.KEY_Up: self._move_selection(-1); return True
         return False
 
     def _move_selection(self, direction: int):
         current = self._list_box.get_selected_row()
         if current is None:
             first = self._list_box.get_row_at_index(0)
-            if first:
-                self._list_box.select_row(first)
+            if first: self._list_box.select_row(first)
             return
-
         idx = current.get_index()
-        target_idx = idx + direction
-        target = self._list_box.get_row_at_index(target_idx)
-        if target:
-            self._list_box.select_row(target)
-            target.grab_focus()
-
-    # ── Helpers ──────────────────────────────────────────────────────────────
+        target = self._list_box.get_row_at_index(idx + direction)
+        if target: self._list_box.select_row(target); target.grab_focus()
 
     def _iter_rows(self):
         row = self._list_box.get_first_child()
