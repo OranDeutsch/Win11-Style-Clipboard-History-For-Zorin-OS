@@ -35,6 +35,12 @@ _HAS_YDOTOOL: bool = shutil.which('ydotool') is not None
 
 POPUP_WIDTH = 580
 SETTINGS_PATH = Path.home() / '.local' / 'share' / 'clipboard-history' / 'settings.json'
+BIN_DIR = Path.home() / '.local' / 'bin'
+SHORTCUT_COMMAND = str(BIN_DIR / 'clipboard-history-show')
+MK_SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys'
+CH_PATH = '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/'
+CH_SCHEMA = f'{MK_SCHEMA}.custom-keybinding:{CH_PATH}'
+DEFAULT_HOTKEY = '<Super>v'
 
 # Positioning Modes
 POSITION_OS_DEFAULT = 'os-default'
@@ -354,6 +360,84 @@ def _get_window_class(window_id: int) -> str:
         return ''
 
 
+def _run_gsettings(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ['gsettings', *args],
+        capture_output=True,
+        text=True,
+        timeout=1.0,
+    )
+
+
+def _get_hotkey() -> str:
+    try:
+        result = _run_gsettings(['get', CH_SCHEMA, 'binding'])
+        if result.returncode == 0:
+            return result.stdout.strip().strip("'") or DEFAULT_HOTKEY
+    except Exception as e:
+        print(f'[popup] hotkey read failed: {e}', flush=True)
+    return DEFAULT_HOTKEY
+
+
+def _set_hotkey(binding: str) -> bool:
+    try:
+        result = _run_gsettings(['get', MK_SCHEMA, 'custom-keybindings'])
+        paths = []
+        if result.returncode == 0:
+            paths = [
+                p.strip().strip("'")
+                for p in result.stdout.strip().strip('[]').split(',')
+                if p.strip()
+            ]
+
+        for path in paths:
+            if path == CH_PATH:
+                continue
+            schema = f'{MK_SCHEMA}.custom-keybinding:{path}'
+            current = _run_gsettings(['get', schema, 'binding'])
+            if current.returncode == 0 and current.stdout.strip() == f"'{binding}'":
+                _run_gsettings(['set', schema, 'binding', "''"])
+
+        _run_gsettings(['set', CH_SCHEMA, 'name', 'Clipboard History'])
+        _run_gsettings(['set', CH_SCHEMA, 'command', SHORTCUT_COMMAND])
+        bind = _run_gsettings(['set', CH_SCHEMA, 'binding', f"'{binding}'"])
+        if bind.returncode != 0:
+            print(f'[popup] hotkey set failed: {bind.stderr.strip()!r}', flush=True)
+            return False
+
+        if CH_PATH not in paths:
+            paths.append(CH_PATH)
+            formatted = '[' + ', '.join(f"'{p}'" for p in paths) + ']'
+            _run_gsettings(['set', MK_SCHEMA, 'custom-keybindings', formatted])
+
+        print(f'[popup] hotkey={binding}', flush=True)
+        return True
+    except Exception as e:
+        print(f'[popup] hotkey set failed: {e}', flush=True)
+        return False
+
+
+def _event_to_accelerator(keyval: int, state: Gdk.ModifierType) -> str | None:
+    if keyval in (
+        Gdk.KEY_Escape,
+        Gdk.KEY_Shift_L, Gdk.KEY_Shift_R,
+        Gdk.KEY_Control_L, Gdk.KEY_Control_R,
+        Gdk.KEY_Alt_L, Gdk.KEY_Alt_R,
+        Gdk.KEY_Super_L, Gdk.KEY_Super_R,
+        Gdk.KEY_Meta_L, Gdk.KEY_Meta_R,
+    ):
+        return None
+
+    mods = state & Gtk.accelerator_get_default_mod_mask()
+    if not (mods & (Gdk.ModifierType.CONTROL_MASK |
+                    Gdk.ModifierType.ALT_MASK |
+                    Gdk.ModifierType.SHIFT_MASK |
+                    Gdk.ModifierType.SUPER_MASK |
+                    Gdk.ModifierType.META_MASK)):
+        return None
+    return Gtk.accelerator_name(keyval, mods)
+
+
 def _is_terminal(wm_class: str) -> bool:
     """Check if the given window class represents a terminal emulator."""
     wm_class = (wm_class or '').lower()
@@ -422,6 +506,9 @@ class ClipboardPopup(Adw.Window):
         self._position_mode = POSITION_OS_DEFAULT
         self._settings_popover: Gtk.Popover | None = None
         self._dialog_open = False
+        self._capturing_hotkey = False
+        self._hotkey_label: Gtk.Label | None = None
+        self._hotkey_button: Gtk.Button | None = None
         self._load_settings()
         self._position_buttons: dict[str, Gtk.CheckButton] = {}
 
@@ -532,6 +619,31 @@ class ClipboardPopup(Adw.Window):
             box.append(btn)
 
         box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
+
+        hotkey_title = Gtk.Label(label='Keyboard Shortcut')
+        hotkey_title.set_halign(Gtk.Align.START)
+        hotkey_title.add_css_class('heading')
+        box.append(hotkey_title)
+
+        hotkey_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        hotkey_box.set_halign(Gtk.Align.FILL)
+
+        self._hotkey_label = Gtk.Label(label=_get_hotkey(), halign=Gtk.Align.START, xalign=0)
+        self._hotkey_label.set_hexpand(True)
+        self._hotkey_label.add_css_class('caption')
+        hotkey_box.append(self._hotkey_label)
+
+        self._hotkey_button = Gtk.Button(label='Set Shortcut')
+        self._hotkey_button.connect('clicked', self._on_capture_hotkey_clicked)
+        hotkey_box.append(self._hotkey_button)
+
+        reset_btn = Gtk.Button(label='Reset')
+        reset_btn.connect('clicked', self._on_reset_hotkey_clicked)
+        hotkey_box.append(reset_btn)
+
+        box.append(hotkey_box)
+
+        box.append(Gtk.Separator(margin_top=4, margin_bottom=4))
         del_all_btn = Gtk.Button(label='Delete All History')
         del_all_btn.add_css_class('destructive-action')
         del_all_btn.connect('clicked', self._on_delete_all_clicked)
@@ -554,6 +666,29 @@ class ClipboardPopup(Adw.Window):
         if response == 'delete':
             self._db.clear_all()
             self._populate()
+
+    def _on_capture_hotkey_clicked(self, btn):
+        self._capturing_hotkey = True
+        if self._hotkey_label:
+            self._hotkey_label.set_text('Press a shortcut...')
+        if self._hotkey_button:
+            self._hotkey_button.set_label('Listening')
+            self._hotkey_button.set_sensitive(False)
+
+    def _finish_hotkey_capture(self, binding: str | None) -> None:
+        self._capturing_hotkey = False
+        if binding and _set_hotkey(binding):
+            current = binding
+        else:
+            current = _get_hotkey()
+        if self._hotkey_label:
+            self._hotkey_label.set_text(current)
+        if self._hotkey_button:
+            self._hotkey_button.set_label('Set Shortcut')
+            self._hotkey_button.set_sensitive(True)
+
+    def _on_reset_hotkey_clicked(self, btn):
+        self._finish_hotkey_capture(DEFAULT_HOTKEY)
 
     def _load_settings(self) -> None:
         try:
@@ -911,6 +1046,15 @@ class ClipboardPopup(Adw.Window):
         return False
 
     def _on_key_pressed(self, ctrl, keyval, keycode, state):
+        if self._capturing_hotkey:
+            if keyval == Gdk.KEY_Escape:
+                self._finish_hotkey_capture(None)
+                return True
+            binding = _event_to_accelerator(keyval, state)
+            if binding:
+                self._finish_hotkey_capture(binding)
+            return True
+
         if self._search_entry.has_focus() and keyval not in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Delete):
             return False
         if keyval == Gdk.KEY_Escape: self._hide_popup(); return True

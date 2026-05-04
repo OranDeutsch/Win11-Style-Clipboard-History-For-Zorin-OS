@@ -1,3 +1,9 @@
+# TL;DR: do not commit local runtime state or generated build output.
+# Keep personal agent/tool folders, Cargo/Python build artifacts, compiled
+# GNOME schemas, extension zips, and local clipboard data out of git.
+# If a file is required for users to install or run the app, place it in the
+# repo intentionally and remove/adjust the matching ignore rule in this file.
+
 # Generic Python gitignore
 __pycache__/
 *.py[cod]
@@ -12,6 +18,8 @@ venv.bak/
 
 # Project specific
 /.claude
+/.codex
+/.agents
 /target
 *.shell-extension.zip
 **/gschemas.compiled

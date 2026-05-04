@@ -4,6 +4,10 @@ A Python/GTK4 clipboard-history picker for Zorin OS (GNOME). It aims to feel clo
 
 Press `Super+V` to open the clipboard picker, search previous entries, select with the arrow keys, and paste with `Enter` or a click.
 
+## TL;DR Warning
+
+This is a desktop integration tool, not a sandboxed app. The installer adds a user systemd service, writes GNOME keyboard-shortcut settings with `gsettings`, installs files under `~/.local`, and may configure `/dev/uinput` access so the app can paste into other windows. Read `install.sh` first if you are unsure, and do not install it on a system where you are not comfortable with those changes.
+
 ## Features
 
 - **Contextual Positioning**: Choose between **Caret** (near text cursor), **Mouse**, **Window**, or **OS Default** placement.
@@ -25,7 +29,7 @@ Run:
 
 ### Custom Hotkey
 
-By default, the picker is bound to `Super+V`. To use a different hotkey, pass the `--hotkey` argument:
+By default, the picker is bound to `Super+V`. To use a different hotkey during install, pass the `--hotkey` argument:
 
 ```bash
 ./install.sh --hotkey "<Primary><Shift>v"
@@ -36,6 +40,12 @@ The installer will:
 - Set up udev rules for `/dev/uinput` access.
 - Install the `clipboard-history` daemon as a systemd user service.
 - Bind your chosen hotkey to open the picker.
+
+You can also change the hotkey live from the app:
+
+1. Open the picker.
+2. Click the **Settings** (gear) icon.
+3. Click **Set Shortcut** and press your new key combination.
 
 ## Usage
 
@@ -52,7 +62,7 @@ The installer will:
 2. Click the **Settings** (gear) icon.
 3. Configure your preferences:
    - **Positioning Mode**: Explicitly set the popup to follow your **Caret**, **Mouse**, **Active Window**, or use the **OS Default**.
-   - **Wayland Caret Positioning (Experimental)**: Enable absolute coordinate tracking on Wayland/GNOME.
+   - **Keyboard Shortcut**: Change the global hotkey live without reinstalling.
    - **Delete All History**: Completely wipe the database, including pinned items.
 
 ## Project Structure
